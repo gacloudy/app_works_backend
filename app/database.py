@@ -1,5 +1,7 @@
 import os
 import logging
+from urllib.parse import urlparse
+
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
@@ -8,29 +10,50 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
+CLOUD_SQL_INSTANCE = "xenon-depth-342814:us-central1:trader-db"
 
-def _resolve_database_url() -> str:
+
+def _build_engine():
     if os.environ.get("GCP_PROJECT_ID"):
         from app.gcp_secrets import get_secret
-        log.info("DATABASE_URL を Secret Manager から取得します")
-        return get_secret("DATABASE_URL")
+        from google.cloud.sql.connector import Connector
+        import pg8000
+
+        log.info("Cloud SQL Connector で接続します")
+
+        db_url = get_secret("DATABASE_URL")
+        parsed = urlparse(db_url)
+        connector = Connector()
+
+        def getconn():
+            return connector.connect(
+                CLOUD_SQL_INSTANCE,
+                "pg8000",
+                user=parsed.username,
+                password=parsed.password,
+                db=parsed.path.lstrip("/"),
+            )
+
+        return create_engine("postgresql+pg8000://", creator=getconn, echo=False)
+
     log.info("DATABASE_URL を .env から取得します")
-    return os.environ["DATABASE_URL"]
+    db_url = os.environ["DATABASE_URL"]
+    if "?schema=" in db_url:
+        db_url = db_url.split("?schema=")[0]
+    return create_engine(
+        db_url.replace("postgresql://", "postgresql+psycopg2://"), echo=False
+    )
 
 
-_url = _resolve_database_url()
-if "?schema=" in _url:
-    _url = _url.split("?schema=")[0]
-DATABASE_URL = _url.replace("postgresql://", "postgresql+psycopg2://")
+engine = _build_engine()
 
-engine = create_engine(DATABASE_URL, echo=False)
 
-# 接続時にsearch_pathをtrader_schemaに設定する
 @event.listens_for(engine, "connect")
 def set_search_path(dbapi_conn, connection_record):
     cursor = dbapi_conn.cursor()
     cursor.execute("SET search_path TO trader_schema")
     cursor.close()
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
