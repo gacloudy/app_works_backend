@@ -1,7 +1,8 @@
 substitutions:
   _REGION: asia-northeast1
-  _SERVICE: app-works-backend
-  _AR_REPO: app-works
+  _PROJECT_ID: xenon-depth-342814
+  _SERVICE: app
+  _AR_REPO: trader-backend
 
 steps:
   # Docker イメージをビルド
@@ -9,9 +10,9 @@ steps:
     args:
       - build
       - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
+      - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
       - -t
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:latest
+      - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:latest
       - .
 
   # Artifact Registry へプッシュ
@@ -19,7 +20,7 @@ steps:
     args:
       - push
       - --all-tags
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}
+      - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}
 
   # Cloud Run へデプロイ
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -28,14 +29,14 @@ steps:
       - run
       - deploy
       - ${_SERVICE}
-      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
+      - --image=${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
       - --region=${_REGION}
       - --platform=managed
       - --allow-unauthenticated
 
 images:
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
-  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:latest
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:latest
 
 options:
   logging: CLOUD_LOGGING_ONLY
