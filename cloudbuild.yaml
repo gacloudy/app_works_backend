@@ -39,4 +39,4 @@ images:
   - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:latest
 
 options:
-  logging: CLOUD_LOGGING_ONLY
+  logging: LEGACY
