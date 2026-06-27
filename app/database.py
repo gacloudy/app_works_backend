@@ -10,8 +10,6 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-CLOUD_SQL_INSTANCE = "xenon-depth-342814:us-central1:trader-db"
-
 
 def _build_engine():
     if os.environ.get("GCP_PROJECT_ID"):
@@ -22,12 +20,13 @@ def _build_engine():
         log.info("Cloud SQL Connector で接続します")
 
         db_url = get_secret("DATABASE_URL")
+        instance_name = get_secret("CLOUD_SQL_INSTANCE")
         parsed = urlparse(db_url)
         connector = Connector()
 
         def getconn():
             return connector.connect(
-                CLOUD_SQL_INSTANCE,
+                instance_name,
                 "pg8000",
                 user=parsed.username,
                 password=parsed.password,
