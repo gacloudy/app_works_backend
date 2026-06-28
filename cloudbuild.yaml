@@ -1,7 +1,7 @@
 substitutions:
   _REGION: asia-northeast1
   _PROJECT_ID: xenon-depth-342814
-  _SERVICE: app
+  _SERVICE: trader-backend
   _AR_REPO: trader-backend
 
 steps:
