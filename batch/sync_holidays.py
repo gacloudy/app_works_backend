@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 load_dotenv()
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from app.database import SessionLocal
 from app.models.holiday_master import HolidayMaster
 
@@ -56,20 +58,17 @@ def parse_csv(content: str) -> list[dict]:
     return records
 
 
-def upsert_holidays(records: list[dict]) -> tuple[int, int]:
-    inserted = updated = 0
+def upsert_holidays(records: list[dict]) -> None:
+    now = datetime.now()
+    rows = [{"date": r["date"], "name": r["name"], "created_at": now} for r in records]
     with SessionLocal() as db:
-        for rec in records:
-            existing = db.get(HolidayMaster, rec["date"])
-            if existing:
-                if existing.name != rec["name"]:
-                    existing.name = rec["name"]
-                    updated += 1
-            else:
-                db.add(HolidayMaster(**rec))
-                inserted += 1
+        stmt = pg_insert(HolidayMaster).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["date"],
+            set_={"name": stmt.excluded.name},
+        )
+        db.execute(stmt)
         db.commit()
-    return inserted, updated
 
 
 def main() -> None:
@@ -77,8 +76,8 @@ def main() -> None:
     with httpx.Client() as client:
         content = fetch_csv(client)
     records = parse_csv(content)
-    inserted, updated = upsert_holidays(records)
-    log.info("完了: 新規 %d / 更新 %d 件", inserted, updated)
+    upsert_holidays(records)
+    log.info("完了: %d 件を upsert", len(records))
     log.info("=== 祝日マスタ同期バッチ 終了 ===")
 
 

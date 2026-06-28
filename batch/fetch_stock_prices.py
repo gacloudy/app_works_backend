@@ -44,7 +44,7 @@ NOMURA_URL = (
 )
 YAHOO_URL = "https://finance.yahoo.co.jp/quote/{code}.T"
 
-FETCH_DELAY = 1.0  # seconds between stocks
+FETCH_DELAY = 3.0  # seconds between stocks
 
 HEADERS = {
     "User-Agent": (
@@ -193,10 +193,9 @@ def parse_yahoo(html: str, code: str) -> dict | None:
     """Yahoo Finance Japan の HTML を解析する。"""
     soup = BeautifulSoup(html, "html.parser")
 
-    # 日付: "MM/DD" パターン（年なし）
+    # 日付: "リアルタイム株価 M/DD" パターン
     trade_date: date | None = None
-    # "(06/19 15:30)" や "06/19" の形式を探す
-    m = re.search(r"\b(\d{1,2})/(\d{2})(?:\s+\d{1,2}:\d{2})?", html)
+    m = re.search(r"リアルタイム株価\s+(\d{1,2})/(\d{2})", html)
     if m:
         today = date.today()
         try:
@@ -361,6 +360,12 @@ def main() -> None:
             if page_date is None:
                 log.warning("[%s] ページ日付を解析できず → スキップ", code)
                 insert_fetch_log(run_id, code, "skip", "ページ日付を解析できず", data.get("source"))
+                skipped += 1
+                time.sleep(FETCH_DELAY)
+                continue
+            elif page_date != today:
+                log.warning("[%s] ページ日付(%s)が本日(%s)と不一致 → スキップ", code, page_date, today)
+                insert_fetch_log(run_id, code, "skip", f"ページ日付({page_date})が本日({today})と不一致", data.get("source"))
                 skipped += 1
                 time.sleep(FETCH_DELAY)
                 continue
