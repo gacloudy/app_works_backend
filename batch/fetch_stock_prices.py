@@ -33,6 +33,7 @@ from app.database import SessionLocal
 from app.models.stock_master import StockMaster
 from app.models.stock_price import StockPrice
 from app.models.batch_fetch_log import BatchFetchLog
+from app.models.holiday_master import HolidayMaster
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -304,6 +305,19 @@ def main() -> None:
 
     today = date.today()
     log.info("本日: %s", today)
+
+    # 土日チェック
+    weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
+    if today.weekday() >= 5:
+        log.info("本日は%s曜日のためスキップ", weekday_names[today.weekday()])
+        return
+
+    # 祝日チェック
+    with SessionLocal() as db:
+        holiday = db.get(HolidayMaster, today)
+        if holiday:
+            log.info("本日は祝日（%s）のためスキップ", holiday.name)
+            return
 
     with SessionLocal() as db:
         # is_delisted カラムが未実装のため、現時点では全銘柄を対象とする
