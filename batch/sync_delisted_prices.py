@@ -6,7 +6,7 @@ stock_master の上場廃止フラグを stock_price に反映するバッチ。
   - 該当コードの stock_price レコードを is_delisted = TRUE に一括更新
 
 実行方法:
-    cd backend
+    cd app_works_backend
     .venv\\Scripts\\python -m batch.sync_delisted_prices
 """
 

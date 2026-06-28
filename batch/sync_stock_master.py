@@ -3,7 +3,7 @@ JPX から上場銘柄一覧（data_j.xls）をダウンロードし、
 プライム（内国株式）の銘柄を stock_master テーブルに登録するバッチ。
 
 実行方法:
-    cd backend
+    cd app_works_backend
     .venv\Scripts\python -m batch.sync_stock_master
 """
 
