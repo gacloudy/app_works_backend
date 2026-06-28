@@ -34,6 +34,7 @@ steps:
       - --platform=managed
       - --allow-unauthenticated
       - --timeout=300
+      - --set-env-vars=GCP_PROJECT_ID=${_PROJECT_ID}
 
 images:
   - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
