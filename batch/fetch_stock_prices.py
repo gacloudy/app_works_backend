@@ -44,7 +44,7 @@ NOMURA_URL = (
 )
 YAHOO_URL = "https://finance.yahoo.co.jp/quote/{code}.T"
 
-FETCH_DELAY = 3.0  # seconds between stocks
+FETCH_DELAY = 2.0  # seconds between stocks
 
 HEADERS = {
     "User-Agent": (

@@ -33,14 +33,23 @@ def _build_engine():
                 db=parsed.path.lstrip("/"),
             )
 
-        return create_engine("postgresql+pg8000://", creator=getconn, echo=False)
+        return create_engine(
+            "postgresql+pg8000://",
+            creator=getconn,
+            echo=False,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+        )
 
     log.info("DATABASE_URL を .env から取得します")
     db_url = os.environ["DATABASE_URL"]
     if "?schema=" in db_url:
         db_url = db_url.split("?schema=")[0]
     return create_engine(
-        db_url.replace("postgresql://", "postgresql+psycopg2://"), echo=False
+        db_url.replace("postgresql://", "postgresql+psycopg2://"),
+        echo=False,
+        pool_pre_ping=True,
+        pool_recycle=1800,
     )
 
 
