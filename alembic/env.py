@@ -33,6 +33,12 @@ if "?schema=" in _url:
 config.set_main_option("sqlalchemy.url", _url.replace("postgresql://", "postgresql+psycopg2://"))
 
 
+def include_object(object, name, type_, reflected, compare_to):
+    if type_ == "table" and name == "alembic_version":
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
@@ -41,6 +47,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_schemas=True,
+        include_object=include_object,
         version_table_schema="trader_schema",
     )
     with context.begin_transaction():
@@ -65,6 +72,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             include_schemas=True,
+            include_object=include_object,
             version_table_schema="trader_schema",
         )
         with context.begin_transaction():
