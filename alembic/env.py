@@ -15,7 +15,10 @@ from app.database import Base
 import app.models.stock_master     # noqa: F401
 import app.models.stock_price      # noqa: F401
 import app.models.batch_fetch_log  # noqa: F401
-import app.models.holiday_master   # noqa: F401
+import app.models.holiday_master    # noqa: F401
+import app.models.technical_indicator  # noqa: F401
+import app.models.signal_history   # noqa: F401
+import app.models.signal_stats     # noqa: F401
 
 config = context.config
 

@@ -7,7 +7,7 @@ stock_master の上場廃止フラグを stock_price に反映するバッチ。
 
 実行方法:
     cd app_works_backend
-    .venv\\Scripts\\python -m batch.sync_delisted_prices
+    .venv\\Scripts\\python batch\\01_sync_delisted_prices.py
 """
 
 import sys
