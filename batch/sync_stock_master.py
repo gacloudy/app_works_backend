@@ -4,7 +4,7 @@ JPX から上場銘柄一覧（data_j.xls）をダウンロードし、
 
 実行方法:
     cd app_works_backend
-    .venv\\Scripts\\python batch\\batch_00_sync_stock_master.py
+    .venv\\Scripts\\python batch\\sync_stock_master.py
 """
 
 import io

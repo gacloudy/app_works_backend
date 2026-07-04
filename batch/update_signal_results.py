@@ -6,7 +6,7 @@ N 取引日 = stock_price に実際に存在する取引日を N 件カウント
 
 実行方法:
     cd app_works_backend
-    .venv\\Scripts\\python batch\\batch_05_update_signal_results.py
+    .venv\\Scripts\\python batch\\update_signal_results.py
 """
 
 import sys

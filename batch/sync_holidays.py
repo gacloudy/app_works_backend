@@ -3,7 +3,7 @@
 
 実行方法:
     cd app_works_backend
-    .venv\\Scripts\\python batch\\batch_07_sync_holidays.py
+    .venv\\Scripts\\python batch\\sync_holidays.py
 """
 
 import csv
