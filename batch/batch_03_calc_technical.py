@@ -5,7 +5,7 @@
 
 実行方法:
     cd app_works_backend
-    .venv\\Scripts\\python batch\\03_calc_technical.py
+    .venv\\Scripts\\python batch\\batch_03_calc_technical.py
 """
 
 import sys

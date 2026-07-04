@@ -12,7 +12,7 @@ technical_indicators テーブルからシグナルを検出し、signal_history
 
 実行方法:
     cd app_works_backend
-    .venv\\Scripts\\python batch\\04_detect_signals.py
+    .venv\\Scripts\\python batch\\batch_04_detect_signals.py
 """
 
 import sys
