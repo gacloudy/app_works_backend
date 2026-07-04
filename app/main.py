@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import stock_master, stock_price
+from app.routers import chat, stock_master, stock_price
 
 app = FastAPI(
     title="株価分析 API",
@@ -18,6 +18,7 @@ app.add_middleware(
 
 app.include_router(stock_master.router, prefix="/api/v1")
 app.include_router(stock_price.router, prefix="/api/v1")
+app.include_router(chat.router, prefix="/api/v1")
 
 
 @app.get("/health")

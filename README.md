@@ -31,15 +31,82 @@ cd app_works_backend
 
 ```bash
 # cd app_works_backend で実行
-.venv\Scripts\python batch\00_sync_stock_master.py      # JPX から上場銘柄を同期
-.venv\Scripts\python batch\01_sync_delisted_prices.py   # 上場廃止銘柄の stock_price フラグを更新
-.venv\Scripts\python batch\02_fetch_stock_prices.py     # 全銘柄の株価を取得・登録
-.venv\Scripts\python batch\03_calc_technical.py         # テクニカル指標を計算
-.venv\Scripts\python batch\04_detect_signals.py         # シグナルを検出・記録
-.venv\Scripts\python batch\05_update_signal_results.py  # シグナル後のリターンを更新
-.venv\Scripts\python batch\06_aggregate_stats.py        # 統計サマリーを集計（週1回推奨）
-.venv\Scripts\python batch\07_sync_holidays.py          # 内閣府CSVから祝日を同期（月1回推奨）
+.venv\Scripts\python batch\sync_stock_master.py       # JPX から上場銘柄を同期
+.venv\Scripts\python batch\sync_delisted_prices.py    # 上場廃止銘柄の stock_price フラグを更新
+.venv\Scripts\python batch\fetch_stock_prices.py      # 全銘柄の株価を取得・登録
+.venv\Scripts\python batch\calc_technical.py          # テクニカル指標を計算
+.venv\Scripts\python batch\detect_signals.py          # シグナルを検出・記録
+.venv\Scripts\python batch\update_signal_results.py   # シグナル後のリターンを更新
+.venv\Scripts\python batch\aggregate_stats.py         # 統計サマリーを集計（週1回推奨）
+.venv\Scripts\python batch\sync_holidays.py           # 内閣府CSVから祝日を同期（月1回推奨）
 ```
+
+各バッチは前段の出力に依存するため、上記の順序を守って実行する（詳細は次節）。
+
+---
+
+## 各バッチの役割
+
+### 1. `sync_stock_master.py` — 銘柄マスタ同期
+
+JPX（日本取引所）の上場銘柄一覧ページから `data_j.xls` の URL を取得してダウンロードし、**プライム（内国株式）** 市場の銘柄のみを抽出して `stock_master` に反映する。
+
+- Excel に載っている銘柄 → 新規なら `INSERT`、既存なら名称・業種・市場区分を `UPDATE`。過去に上場廃止（`isDelisted=true`）だった銘柄が再掲載されていれば「復活」として `isDelisted=false` に戻す。
+- Excel に載っていない既存銘柄 → `isDelisted=true` に更新（上場廃止扱い）。
+- 後続の全バッチが参照する銘柄一覧の起点となるため、最初に実行する必要がある。
+
+### 2. `sync_delisted_prices.py` — 上場廃止フラグの反映
+
+`stock_master.isDelisted=true` の銘柄コードを集め、対応する `stock_price` レコードの `is_delisted` を一括で `true` に更新する。`sync_stock_master.py` が銘柄の上場廃止を検出した直後に実行し、株価データ側のフラグを追従させる。
+
+### 3. `fetch_stock_prices.py` — 株価取得
+
+`stock_master` の全銘柄について、当日の株価（始値・高値・安値・前日終値・出来高・現在値）を取得し `stock_price` に upsert する。
+
+- 取得元は **野村證券のページを一次**、失敗時は **Yahoo Finance Japan に二次フォールバック**。
+- 土日および `holiday_master` に登録された祝日は取得自体をスキップする。
+- ページ上の日付が「本日」と一致しない場合や現在値が取得できない場合は登録せず、理由とともに `batch_fetch_log` に記録する（銘柄ごとに `skip` / `error`）。
+- 1銘柄ごとに `FETCH_DELAY`（2秒）のウェイトを挟み、サイトへの負荷を抑える。
+
+### 4. `calc_technical.py` — テクニカル指標計算
+
+`stock_price` の終値（`current_price`）と出来高から、銘柄ごとに以下を計算し `technical_indicators` に保存する。
+
+- 移動平均（MA5 / MA25 / MA75）
+- MACD（EMA12 − EMA26）・シグナル線（EMA9）・ヒストグラム
+- RSI（14日）
+- ボリンジャーバンド（20日, ±2σ）
+- 出来高20日移動平均・出来高比率
+
+前回計算済みの最終日から `WARMUP_DAYS`（150日）分さかのぼって取得し、MA75 などの計算に必要な助走期間を確保したうえで差分のみ計算・保存する。
+
+### 5. `detect_signals.py` — シグナル検出
+
+`technical_indicators` の前日・当日を比較し、以下7種の売買シグナルを検出して `signal_history` に記録する（`price_at_signal` も同時に記録）。
+
+| シグナル | 条件 |
+|---|---|
+| `golden_cross` | MA5 が MA25 を上抜け |
+| `dead_cross` | MA5 が MA25 を下抜け |
+| `rsi_oversold` | RSI14 が 30 以下に突入 |
+| `rsi_overbought` | RSI14 が 70 以上に突入 |
+| `bb_lower_touch` | 株価がボリンジャー下限に接触 |
+| `bb_upper_touch` | 株価がボリンジャー上限に接触 |
+| `volume_surge_up` | 出来高が20日平均の2倍超 かつ 上昇 |
+
+前回検出済みの最終シグナル日以降のみを処理し、重複は `(code, signal_date, signal_type)` の一意制約で無視される。
+
+### 6. `update_signal_results.py` — シグナル後のリターン更新
+
+`signal_history` のうち `return_3d` / `return_5d` / `return_10d` / `return_20d` が未確定（NULL）のレコードについて、シグナル発生日から N 取引日後の `stock_price` を参照し、`(N日後の株価 - シグナル時株価) / シグナル時株価 × 100` でリターンを計算・更新する。まだ N 取引日分のデータが蓄積していないシグナルは、その周のみ更新をスキップする。
+
+### 7. `aggregate_stats.py` — 統計サマリー集計
+
+`signal_history` に蓄積されたリターン実績を、シグナル種別 × 業種 × 集計期間（3/5/10/20日）ごとに集計し、勝率・平均リターン・中央値・標準偏差を `signal_stats` に保存する。全業種合計は `industry=""` として別途保存。サンプル数が `MIN_SAMPLES`（10件）未満の組み合わせは信頼性が低いため除外する。日々の増分は小さいため週1回の実行で十分。
+
+### 8. `sync_holidays.py` — 祝日マスタ同期
+
+内閣府が公開する祝日CSVをダウンロードし、`holiday_master` に upsert する。`fetch_stock_prices.py` が祝日をスキップする際に参照する。年1回程度しか更新されないため、月1回の実行で十分。
 
 ---
 
@@ -211,14 +278,14 @@ app_works_backend/
 │   │   └── signal_stats.py
 │   └── routers/              # APIエンドポイント
 ├── batch/
-│   ├── 00_sync_stock_master.py      # 銘柄マスタ同期
-│   ├── 01_sync_delisted_prices.py   # 上場廃止フラグ更新
-│   ├── 02_fetch_stock_prices.py     # 株価取得
-│   ├── 03_calc_technical.py         # テクニカル指標計算
-│   ├── 04_detect_signals.py         # シグナル検出
-│   ├── 05_update_signal_results.py  # リターン更新
-│   ├── 06_aggregate_stats.py        # 統計集計
-│   └── 07_sync_holidays.py          # 祝日同期
+│   ├── sync_stock_master.py       # 銘柄マスタ同期
+│   ├── sync_delisted_prices.py    # 上場廃止フラグ更新
+│   ├── fetch_stock_prices.py      # 株価取得
+│   ├── calc_technical.py          # テクニカル指標計算
+│   ├── detect_signals.py          # シグナル検出
+│   ├── update_signal_results.py   # リターン更新
+│   ├── aggregate_stats.py         # 統計集計
+│   └── sync_holidays.py           # 祝日同期
 ├── alembic/                  # マイグレーション管理
 ├── .env                      # 接続情報（Git管理外）
 └── requirements.txt
