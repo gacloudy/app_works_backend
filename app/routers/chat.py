@@ -1,12 +1,16 @@
 """
 株価チャットボット用エンドポイント。
 
-現時点では LLM（Vertex AI 経由の Claude）への接続は未実装で、
-Tool Use で使う予定のツール定義のみを用意し、常に固定文言を返す。
+毒舌キャラクターAI（役割1）が、株取引の相談として妥当かどうかを判定し、
+そのままキャラクターとしての返答文を返す。株取引の相談内容そのものに対する
+実際の分析回答（役割2）はまだ未実装。Tool Use で使う予定のツール定義も
+あわせて用意する。
 """
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+
+from app.llm_client import classify_and_reply
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -88,13 +92,8 @@ class ChatResponse(BaseModel):
     reply: str
 
 
-FIXED_REPLY = (
-    "ご質問ありがとうございます。現在このチャットボットは開発中のため、"
-    "まだ実際の分析結果にはお答えできません。もうしばらくお待ちください。"
-)
-
-
 @router.post("", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
-    """チャットメッセージを受け取り、固定文言を返す（LLM 未接続の暫定実装）。"""
-    return ChatResponse(reply=FIXED_REPLY)
+    """チャットメッセージを受け取り、毒舌キャラクターAIの判定結果をそのまま返す。"""
+    result = classify_and_reply(req.message)
+    return ChatResponse(reply=result.reply)
