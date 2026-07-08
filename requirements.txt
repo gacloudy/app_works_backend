@@ -40,3 +40,4 @@ cloud-sql-python-connector[pg8000]==1.20.4
 pg8000==1.31.5
 
 anthropic
+voyageai

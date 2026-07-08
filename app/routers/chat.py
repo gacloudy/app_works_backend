@@ -7,10 +7,13 @@
 あわせて用意する。
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from app.llm_client import classify_and_reply
+from app.database import get_db
+from app.llm_client import classify_and_reply, generate_rag_answer
+from app.rag.retrieval import search_kb
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -93,7 +96,16 @@ class ChatResponse(BaseModel):
 
 
 @router.post("", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
-    """チャットメッセージを受け取り、毒舌キャラクターAIの判定結果をそのまま返す。"""
+def chat(req: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
+    """チャットメッセージを受け取り、毒舌キャラクターAIの判定結果を返す。
+
+    ok_category が META（ボット自身の使い方・シグナル用語についての質問）の場合は、
+    ナレッジベースをRAGで検索した内容をもとに回答を生成する。
+    それ以外（STOCK・NG）は、従来通り判定結果の reply をそのまま返す。
+    """
     result = classify_and_reply(req.message)
+    if result.result == "OK" and result.ok_category == "META":
+        chunks = search_kb(db, req.message, top_k=3)
+        reply = generate_rag_answer(req.message, [c.content for c in chunks])
+        return ChatResponse(reply=reply)
     return ChatResponse(reply=result.reply)

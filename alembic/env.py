@@ -19,6 +19,7 @@ import app.models.holiday_master    # noqa: F401
 import app.models.technical_indicator  # noqa: F401
 import app.models.signal_history   # noqa: F401
 import app.models.signal_stats     # noqa: F401
+import app.models.kb_chunk         # noqa: F401
 
 config = context.config
 
