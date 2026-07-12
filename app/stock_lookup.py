@@ -26,9 +26,6 @@ class StockRef(BaseModel):
 # JPX の証券コードは4桁の数字が基本（前後に別の数字が連続しないもののみを候補とする）。
 _CODE_RE = re.compile(r"(?<!\d)\d{4}(?!\d)")
 
-# 銘柄名の先頭何文字が一致すればグループ会社などの部分一致とみなすか。
-_NAME_PREFIX_LEN = 4
-
 # メッセージ側の断片が短すぎて無関係な銘柄まで拾いすぎないようにする下限文字数。
 _MIN_MESSAGE_FRAGMENT_LEN = 2
 
@@ -37,14 +34,25 @@ _MIN_MESSAGE_FRAGMENT_LEN = 2
 _CODE_MATCH_SCORE = 1000
 
 
-def _common_prefix_len(a: str, b: str) -> int:
-    """2つの文字列の先頭から一致している文字数を返す。"""
-    n = 0
-    for ca, cb in zip(a, b):
-        if ca != cb:
-            break
-        n += 1
-    return n
+def _longest_common_substring_len(a: str, b: str) -> int:
+    """2つの文字列に共通して含まれる、最長の連続一致部分文字列の長さを返す。
+
+    先頭一致（プレフィックス一致）だけでなく、「ＵＦＪ」が「三菱ＵＦＪ
+    フィナンシャル・グループ」の途中に含まれるような、文字列中のどの位置に
+    ある一致も拾えるようにするための汎用的な一致度計算。
+    """
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for ca in a:
+        curr = [0] * (len(b) + 1)
+        for j, cb in enumerate(b, start=1):
+            if ca == cb:
+                curr[j] = prev[j - 1] + 1
+                best = max(best, curr[j])
+        prev = curr
+    return best
 
 
 def _match_score(stock: StockMaster, message: str, message_stripped: str, codes_in_message: set[str]) -> int:
@@ -54,21 +62,20 @@ def _match_score(stock: StockMaster, message: str, message_stripped: str, codes_
     スケールで比較できるようにする。一致の長さが長いほど強い一致とみなす:
     - 銘柄コードの完全一致: 常に最優先（_CODE_MATCH_SCORE）
     - 銘柄名そのものがメッセージに含まれる: 銘柄名の文字数
-    - 銘柄名の先頭 _NAME_PREFIX_LEN 文字がメッセージに含まれる: _NAME_PREFIX_LEN
-    - メッセージの先頭部分と銘柄名の先頭部分が一致している: その一致文字数
+    - それ以外: メッセージと銘柄名の最長共通部分文字列の文字数（出現位置は問わない）
+
+    銘柄名はJPXのデータ上、英字部分が全角（例:「ＵＦＪ」）で格納されている
+    ことがあるため、比較のたびにNFKC正規化して半角に統一する（呼び出し元の
+    message は find_candidate_stocks で既に正規化済み）。
     """
+    name = unicodedata.normalize("NFKC", stock.name)
+
     if stock.code in codes_in_message:
         return _CODE_MATCH_SCORE
-    if stock.name in message:
-        return len(stock.name)
+    if name in message:
+        return len(name)
 
-    forward_score = (
-        _NAME_PREFIX_LEN
-        if len(stock.name) >= _NAME_PREFIX_LEN and stock.name[:_NAME_PREFIX_LEN] in message
-        else 0
-    )
-    reverse_score = _common_prefix_len(message_stripped, stock.name)
-    return max(forward_score, reverse_score)
+    return _longest_common_substring_len(message_stripped, name)
 
 
 def find_candidate_stocks(db: Session, message: str) -> list[StockMaster]:
