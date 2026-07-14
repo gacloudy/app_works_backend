@@ -1,6 +1,5 @@
 import os
 import logging
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, event
@@ -11,38 +10,19 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 
-def _build_engine():
+def _get_database_url() -> str:
     if os.environ.get("GCP_PROJECT_ID"):
         from app.gcp_secrets import get_secret
-        from google.cloud.sql.connector import Connector
-        import pg8000
 
-        log.info("Cloud SQL Connector で接続します")
-
-        db_url = get_secret("DATABASE_URL")
-        instance_name = get_secret("CLOUD_SQL_INSTANCE")
-        parsed = urlparse(db_url)
-        connector = Connector()
-
-        def getconn():
-            return connector.connect(
-                instance_name,
-                "pg8000",
-                user=parsed.username,
-                password=parsed.password,
-                db=parsed.path.lstrip("/"),
-            )
-
-        return create_engine(
-            "postgresql+pg8000://",
-            creator=getconn,
-            echo=False,
-            pool_pre_ping=True,
-            pool_recycle=1800,
-        )
+        log.info("Secret Manager から DATABASE_URL を取得します")
+        return get_secret("DATABASE_URL")
 
     log.info("DATABASE_URL を .env から取得します")
-    db_url = os.environ["DATABASE_URL"]
+    return os.environ["DATABASE_URL"]
+
+
+def _build_engine():
+    db_url = _get_database_url()
     if "?schema=" in db_url:
         db_url = db_url.split("?schema=")[0]
     return create_engine(
