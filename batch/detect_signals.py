@@ -10,6 +10,9 @@ technical_indicators テーブルからシグナルを検出し、signal_history
   bb_upper_touch   : 株価がボリンジャー上限に触れた
   volume_surge_up  : 出来高が20日平均の2倍超 かつ 上昇
 
+signal_skip（株式分割・極端な値動き）の除外期間に入るシグナルは登録しない。
+detect_price_anomalies.py の後に実行すること。
+
 実行方法:
     cd app_works_backend
     .venv\\Scripts\\python batch\\detect_signals.py
@@ -33,6 +36,7 @@ load_dotenv()
 
 from app.database import SessionLocal
 from app.models.signal_history import SignalHistory
+from batch.signal_skip_util import load_skip_windows, skipped_mask
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -164,6 +168,8 @@ def main() -> None:
             WHERE current_price IS NOT NULL
         """)).fetchall()
 
+        skip_windows = load_skip_windows(db)
+
     if not ti_rows:
         log.info("処理対象データなし")
         return
@@ -191,6 +197,12 @@ def main() -> None:
         if last_signal_date:
             sigs = [s for s in sigs if s["signal_date"] > last_signal_date]
         all_signals.extend(sigs)
+
+    if all_signals:
+        skipped = skipped_mask(pd.DataFrame(all_signals), skip_windows, "signal_date")
+        if skipped.any():
+            log.info("除外期間（分割・極端な値動き）のため %d 件をスキップ", int(skipped.sum()))
+        all_signals = [s for s, skip in zip(all_signals, skipped) if not skip]
 
     log.info("検出シグナル: %d 件 → DB保存中...", len(all_signals))
 
