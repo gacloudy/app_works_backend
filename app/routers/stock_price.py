@@ -18,6 +18,11 @@ class LatestPrice(BaseModel):
     trade_date: date
 
 
+class DateCount(BaseModel):
+    trade_date: date
+    count: int
+
+
 class StockPriceDetail(BaseModel):
     code: str
     trade_date: date
@@ -62,6 +67,21 @@ def get_latest_prices(db: Session = Depends(get_db)):
         )
         for row in rows
     }
+
+
+@router.get("/counts-by-date", response_model=list[DateCount])
+def get_counts_by_date(db: Session = Depends(get_db)):
+    """取引日ごとの株価レコード件数を取引日降順で返す。"""
+    rows = (
+        db.query(
+            StockPrice.trade_date,
+            func.count(StockPrice.trade_date).label("count"),
+        )
+        .group_by(StockPrice.trade_date)
+        .order_by(StockPrice.trade_date.desc())
+        .all()
+    )
+    return [DateCount(trade_date=row.trade_date, count=row.count) for row in rows]
 
 
 @router.get("/{code}/history", response_model=list[StockPriceDetail])
