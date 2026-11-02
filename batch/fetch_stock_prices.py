@@ -189,35 +189,47 @@ def parse_nomura(html: str, code: str) -> dict | None:
 # Yahoo Finance Japan パーサー
 # ---------------------------------------------------------------------------
 
+def _yahoo_indicator(data: str, key: str) -> tuple[str | None, date | None]:
+    """埋め込みJSONの indicators.<key> から (値, 更新日) を取り出す。"""
+    m = re.search(
+        rf'"{key}":\{{"name":"[^"]*","value":"([^"]*)","updateDate":"[^"]*","updateDateMeta":"(\d{{4}})-(\d{{2}})-(\d{{2}})',
+        data,
+    )
+    if not m:
+        return None, None
+    return m.group(1), date(int(m.group(2)), int(m.group(3)), int(m.group(4)))
+
+
 def parse_yahoo(html: str, code: str) -> dict | None:
-    """Yahoo Finance Japan の HTML を解析する。"""
-    soup = BeautifulSoup(html, "html.parser")
+    """Yahoo Finance Japan の HTML を解析する。
 
-    # 日付: "リアルタイム株価 M/DD" パターン
-    trade_date: date | None = None
-    m = re.search(r"リアルタイム株価\s+(\d{1,2})/(\d{2})", html)
-    if m:
-        today = date.today()
-        try:
-            trade_date = date(today.year, int(m.group(1)), int(m.group(2)))
-        except ValueError:
-            pass
+    表示用HTMLはラベルの隣にツールチップ要素が入り構造が変わりやすいため、
+    ページに埋め込まれた JSON（Next.js のデータ。\\" でエスケープされている）から値を読む。
+      現在値           : priceBoard.board.price.value（後続の "price":"..." は PTS の値なので使わない）
+      始値/高値/安値等 : detailData.indicators.<openPrice|highPrice|lowPrice|previousPrice|volume>
+      取引日           : 出来高（なければ始値）の updateDateMeta の日付部分
+    """
+    data = html.replace('\\"', '"')
 
-    open_txt = find_label_value(soup, "始値")
-    high_txt = find_label_value(soup, "高値")
-    low_txt  = find_label_value(soup, "安値")
-    prev_txt = find_label_value(soup, "前日終値")
-    vol_txt  = find_label_value(soup, "出来高")
+    cur_txt = None
+    board = data.find('"priceBoard":{')
+    if board >= 0:
+        m = re.search(r'"price":\{"value":"([^"]*)"', data[board:board + 3000])
+        if m:
+            cur_txt = m.group(1)
 
-    # 現在値はラベルなしで大きく表示されることが多い
-    cur_txt = find_label_value(soup, "現在値") or find_label_value(soup, "株価")
+    open_txt, open_date = _yahoo_indicator(data, "openPrice")
+    high_txt, _         = _yahoo_indicator(data, "highPrice")
+    low_txt, _          = _yahoo_indicator(data, "lowPrice")
+    prev_txt, _         = _yahoo_indicator(data, "previousPrice")
+    vol_txt, vol_date   = _yahoo_indicator(data, "volume")
 
     if cur_txt is None and open_txt is None:
         log.debug("[%s] Yahoo: 値が見つかりませんでした", code)
         return None
 
     return {
-        "trade_date":    trade_date,
+        "trade_date":    vol_date or open_date,
         "open_price":    parse_price(open_txt),
         "high_price":    parse_price(high_txt),
         "low_price":     parse_price(low_txt),
@@ -319,8 +331,12 @@ def main() -> None:
             return
 
     with SessionLocal() as db:
-        # is_delisted カラムが未実装のため、現時点では全銘柄を対象とする
-        stocks = db.query(StockMaster.code).order_by(StockMaster.code).all()
+        stocks = (
+            db.query(StockMaster.code)
+            .filter(StockMaster.is_delisted == False)  # noqa: E712
+            .order_by(StockMaster.code)
+            .all()
+        )
 
     codes = [s.code for s in stocks]
     log.info("取得対象: %d 銘柄", len(codes))
