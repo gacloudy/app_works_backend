@@ -7,3 +7,4 @@ __pycache__/
 *-service-account.json
 *-key.json
 xenon-depth-342814-4b5b81678de6.json
+scripts/pg_backup.sh
