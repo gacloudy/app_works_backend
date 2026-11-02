@@ -22,4 +22,14 @@ class SignalHistory(Base):
     return_5d:       Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
     return_10d:      Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
     return_20d:      Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    # 市場平均（全銘柄等加重）との差
+    mkt_excess_3d:   Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    mkt_excess_5d:   Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    mkt_excess_10d:  Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    mkt_excess_20d:  Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    # 同業種平均（等加重）との差
+    ind_excess_3d:   Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    ind_excess_5d:   Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    ind_excess_10d:  Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    ind_excess_20d:  Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
     created_at:      Mapped[datetime]       = mapped_column(DateTime, default=datetime.now, nullable=False)

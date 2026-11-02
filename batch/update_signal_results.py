@@ -1,8 +1,12 @@
 """
-signal_history テーブルのリターン列（return_3d/5d/10d/20d）を埋めるバッチ。
+signal_history のリターン列を埋めるバッチ。
 
-シグナル発生日から N 取引日後の株価を取得し、リターン（%）を計算して更新する。
-N 取引日 = stock_price に実際に存在する取引日を N 件カウントしたもの。
+  return_Nd      : シグナル発生日から N 取引日後の株価リターン（%）
+  mkt_excess_Nd  : return_Nd − 同日の市場平均リターン（全銘柄の等加重平均）
+  ind_excess_Nd  : return_Nd − 同日の同業種平均リターン（業種内 MIN_INDUSTRY_MEMBERS 銘柄以上の場合のみ）
+
+N 取引日 = その銘柄の stock_price に実際に存在する取引日を N 件カウントしたもの。
+市場・業種平均の計算からは signal_skip の除外期間（分割・極端な値動き）にある銘柄を除く。
 
 実行方法:
     cd app_works_backend
@@ -13,8 +17,9 @@ import sys
 import os
 import logging
 from datetime import datetime
-from decimal import Decimal
 
+import numpy as np
+import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import text
 
@@ -22,80 +27,92 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 load_dotenv()
 
 from app.database import SessionLocal
+from batch.signal_skip_util import load_skip_windows, skipped_mask
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 PERIODS = [3, 5, 10, 20]
+MIN_INDUSTRY_MEMBERS = 3
+RESULT_COLS = [f"{p}_{n}d" for p in ["return", "mkt_excess", "ind_excess"] for n in PERIODS]
+
+
+def calc_forward_returns(prices: pd.DataFrame, skip_windows: pd.DataFrame) -> pd.DataFrame:
+    """銘柄×日付ごとの N 日後リターンと、市場・業種平均との差を計算する。"""
+    prices = prices.sort_values(["code", "trade_date"]).copy()
+    g = prices.groupby("code")["current_price"]
+    for n in PERIODS:
+        prices[f"return_{n}d"] = (g.shift(-n) / prices["current_price"] - 1) * 100
+
+    # 除外期間の銘柄は平均の計算に使わない
+    base = prices[~skipped_mask(prices, skip_windows, "trade_date")]
+    for n in PERIODS:
+        col = f"return_{n}d"
+        mkt = base.groupby("trade_date")[col].mean().rename("mkt")
+        ind = base.groupby(["trade_date", "industry"])[col].agg(["mean", "count"])
+        ind["mean"] = ind["mean"].where(ind["count"] >= MIN_INDUSTRY_MEMBERS)
+        prices = prices.join(mkt, on="trade_date").join(ind["mean"].rename("ind"), on=["trade_date", "industry"])
+        prices[f"mkt_excess_{n}d"] = prices[col] - prices["mkt"]
+        prices[f"ind_excess_{n}d"] = prices[col] - prices["ind"]
+        prices = prices.drop(columns=["mkt", "ind"])
+    return prices
 
 
 def main() -> None:
     start = datetime.now()
     log.info("=== シグナル結果更新バッチ 開始 ===")
 
-    # return_Nd が1つでも NULL の未処理シグナルを取得
+    null_cond = " OR ".join(f"{c} IS NULL" for c in RESULT_COLS)
     with SessionLocal() as db:
-        rows = db.execute(text("""
-            SELECT id, code, signal_date, price_at_signal,
-                   return_3d, return_5d, return_10d, return_20d
+        sig_rows = db.execute(text(f"""
+            SELECT id, code, signal_date, price_at_signal, {", ".join(RESULT_COLS)}
             FROM trader_schema.signal_history
-            WHERE (return_3d IS NULL OR return_5d IS NULL
-                   OR return_10d IS NULL OR return_20d IS NULL)
+            WHERE ({null_cond})
               AND price_at_signal IS NOT NULL
         """)).fetchall()
 
-    if not rows:
-        log.info("更新対象なし")
-        log.info("=== シグナル結果更新バッチ 終了 ===")
-        return
+        if not sig_rows:
+            log.info("更新対象なし")
+            log.info("=== シグナル結果更新バッチ 終了 ===")
+            return
 
-    log.info("更新対象: %d 件", len(rows))
-    updated = 0
+        price_rows = db.execute(text("""
+            SELECT sp.code, sm.industry, sp.trade_date, sp.current_price
+            FROM trader_schema.stock_price sp
+            JOIN trader_schema.stock_master sm ON sp.code = sm.code
+            WHERE sp.current_price IS NOT NULL
+        """)).fetchall()
+        skip_windows = load_skip_windows(db)
 
-    with SessionLocal() as db:
-        for row in rows:
-            sig_id       = row[0]
-            code         = row[1]
-            signal_date  = row[2]
-            price_base   = float(row[3])
-            cur_returns  = {3: row[4], 5: row[5], 10: row[6], 20: row[7]}
+    log.info("更新対象: %d 件", len(sig_rows))
 
-            updates: dict[str, Decimal] = {}
-            for n in PERIODS:
-                col = f"return_{n}d"
-                if cur_returns[n] is not None:
-                    continue  # すでに値あり
+    prices = pd.DataFrame(price_rows, columns=["code", "industry", "trade_date", "current_price"])
+    prices["current_price"] = prices["current_price"].astype(float)
+    fwd = calc_forward_returns(prices, skip_windows).set_index(["code", "trade_date"])
 
-                # signal_date より後の N 番目の取引日の株価を取得
-                price_n = db.execute(text("""
-                    SELECT current_price
-                    FROM (
-                        SELECT current_price,
-                               ROW_NUMBER() OVER (ORDER BY trade_date) AS rn
-                        FROM trader_schema.stock_price
-                        WHERE code = :code
-                          AND trade_date > :signal_date
-                          AND current_price IS NOT NULL
-                    ) t
-                    WHERE rn = :n
-                """), {"code": code, "signal_date": signal_date, "n": n}).scalar()
+    sigs = pd.DataFrame(sig_rows, columns=["id", "code", "signal_date", "price_at_signal", *RESULT_COLS])
+    sigs = sigs.join(fwd[RESULT_COLS], on=["code", "signal_date"], rsuffix="_new")
 
-                if price_n is not None:
-                    ret = (float(price_n) - price_base) / price_base * 100
-                    updates[col] = Decimal(str(round(ret, 4)))
+    params: list[dict] = []
+    for row in sigs.itertuples(index=False):
+        values = {}
+        for c in RESULT_COLS:
+            if getattr(row, c) is not None:
+                continue  # すでに値あり
+            v = getattr(row, f"{c}_new")
+            if v is not None and not np.isnan(v):
+                values[c] = round(float(v), 4)
+        if values:
+            params.append({"id": row.id, **{c: values.get(c) for c in RESULT_COLS}})
 
-            if updates:
-                set_clause = ", ".join(f"{k} = :{k}" for k in updates)
-                db.execute(
-                    text(f"UPDATE trader_schema.signal_history SET {set_clause} WHERE id = :id"),
-                    {**{k: float(v) for k, v in updates.items()}, "id": sig_id},
-                )
-                updated += 1
-
-        db.commit()
+    if params:
+        set_clause = ", ".join(f"{c} = COALESCE({c}, :{c})" for c in RESULT_COLS)
+        with SessionLocal() as db:
+            db.execute(text(f"UPDATE trader_schema.signal_history SET {set_clause} WHERE id = :id"), params)
+            db.commit()
 
     elapsed = (datetime.now() - start).total_seconds()
-    log.info("完了: %d 件更新 (%.1f 秒)", updated, elapsed)
+    log.info("完了: %d 件更新 (%.1f 秒)", len(params), elapsed)
     log.info("=== シグナル結果更新バッチ 終了 ===")
 
 
