@@ -35,6 +35,7 @@ steps:
       - --allow-unauthenticated
       - --timeout=300
       - --set-env-vars=GCP_PROJECT_ID=${_PROJECT_ID}
+      - --set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,VOYAGE_API_KEY=VOYAGE_API_KEY:latest
 
 images:
   - ${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
