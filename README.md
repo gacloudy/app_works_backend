@@ -35,6 +35,7 @@ cd app_works_backend
 .venv\Scripts\python batch\sync_delisted_prices.py    # 上場廃止銘柄の stock_price フラグを更新
 .venv\Scripts\python batch\fetch_stock_prices.py      # 全銘柄の株価を取得・登録
 .venv\Scripts\python batch\calc_technical.py          # テクニカル指標を計算
+.venv\Scripts\python batch\detect_price_anomalies.py  # 株式分割・極端な値動きを検出し、シグナル分析の除外期間を登録
 .venv\Scripts\python batch\detect_signals.py          # シグナルを検出・記録
 .venv\Scripts\python batch\update_signal_results.py   # シグナル後のリターンを更新
 .venv\Scripts\python batch\aggregate_stats.py         # 統計サマリーを集計（週1回推奨）
@@ -80,7 +81,19 @@ JPX（日本取引所）の上場銘柄一覧ページから `data_j.xls` の UR
 
 前回計算済みの最終日から `WARMUP_DAYS`（150日）分さかのぼって取得し、MA75 などの計算に必要な助走期間を確保したうえで差分のみ計算・保存する。
 
-### 5. `detect_signals.py` — シグナル検出
+### 5. `detect_price_anomalies.py` — 株価異常の検出（シグナル分析の除外）
+
+`stock_price` を全期間走査し、株式分割などでデータが不連続になった銘柄や、極端な値動きをした銘柄を `signal_skip` に登録する。ここで登録された期間は、後続のシグナル検出・市場平均の計算・統計集計から除外される。株価の自動補正は行わず、ダッシュボードの「シグナル分析スキップ銘柄」に一覧表示する。
+
+| reason | 判定条件（保存済み前日終値 = 直前取引日の `current_price`） |
+|---|---|
+| `split_suspected` | 取得元の `prev_close` ÷ 保存済み前日終値 が 1.5 / 2 / 3 / 5 / 10 倍などの分割比率に近い、または終値が前日の 1/2・2倍などの水準に不連続に変化 |
+| `price_mismatch` | 取得元の `prev_close` と保存済み前日終値が 3% 超ずれている（分割比率ではない） |
+| `extreme_move` | 保存済み前日終値からの騰落率の絶対値が 30% 以上 |
+
+除外期間は発生日の 30 日前〜40 日後（暦日）。前側は発生日をまたぐ 20 取引日後リターンが歪むため、後側は MA25・BB20 などの指標が発生日のデータを含む間は歪むため。毎回全期間を走査して upsert する（冪等）。
+
+### 6. `detect_signals.py` — シグナル検出
 
 `technical_indicators` の前日・当日を比較し、以下7種の売買シグナルを検出して `signal_history` に記録する（`price_at_signal` も同時に記録）。
 
@@ -94,17 +107,33 @@ JPX（日本取引所）の上場銘柄一覧ページから `data_j.xls` の UR
 | `bb_upper_touch` | 株価がボリンジャー上限に接触 |
 | `volume_surge_up` | 出来高が20日平均の2倍超 かつ 上昇 |
 
-前回検出済みの最終シグナル日以降のみを処理し、重複は `(code, signal_date, signal_type)` の一意制約で無視される。
+前回検出済みの最終シグナル日以降のみを処理し、重複は `(code, signal_date, signal_type)` の一意制約で無視される。`signal_skip` の除外期間に入るシグナルは登録しない。
 
-### 6. `update_signal_results.py` — シグナル後のリターン更新
+### 7. `update_signal_results.py` — シグナル後のリターン更新
 
-`signal_history` のうち `return_3d` / `return_5d` / `return_10d` / `return_20d` が未確定（NULL）のレコードについて、シグナル発生日から N 取引日後の `stock_price` を参照し、`(N日後の株価 - シグナル時株価) / シグナル時株価 × 100` でリターンを計算・更新する。まだ N 取引日分のデータが蓄積していないシグナルは、その周のみ更新をスキップする。
+`signal_history` のリターン列が未確定（NULL）のレコードについて、シグナル発生日から N 取引日後（N = 3/5/10/20）の `stock_price` を参照し、以下を計算・更新する。まだ N 取引日分のデータが蓄積していないシグナルは、その周のみ更新をスキップする。
 
-### 7. `aggregate_stats.py` — 統計サマリー集計
+- `return_Nd`: `(N日後の株価 - シグナル時株価) / シグナル時株価 × 100`
+- `mkt_excess_Nd`: `return_Nd` − 同日の市場平均（全銘柄の等加重平均）
+- `ind_excess_Nd`: `return_Nd` − 同日の同業種平均（業種内3銘柄以上の場合のみ）
 
-`signal_history` に蓄積されたリターン実績を、シグナル種別 × 業種 × 集計期間（3/5/10/20日）ごとに集計し、勝率・平均リターン・中央値・標準偏差を `signal_stats` に保存する。全業種合計は `industry=""` として別途保存。サンプル数が `MIN_SAMPLES`（10件）未満の組み合わせは信頼性が低いため除外する。日々の増分は小さいため週1回の実行で十分。
+市場・業種平均からは `signal_skip` の除外期間にある銘柄を除く。
 
-### 8. `sync_holidays.py` — 祝日マスタ同期
+### 8. `aggregate_stats.py` — 統計サマリー集計
+
+`signal_history` に蓄積されたリターン実績を、シグナル種別 × 業種 × 集計期間（3/5/10/20日）ごとに集計し `signal_stats` に保存する。全業種合計は `industry=""` として別途保存。`signal_skip` の除外期間に入るシグナルは集計しない。
+
+- 生リターンの勝率・平均・中央値・標準偏差（従来どおり）
+- 市場超過リターンの勝率・平均・中央値、同業種平均との差
+- `t_stat`: 同じ日のシグナルを日付ごとの平均で1サンプルにまとめて計算した t 値（同日に大量発生したシグナルで件数が水増しされるのを防ぐ）
+- `first_half_excess` / `second_half_excess` / `is_consistent`: 期間を前後半に分けた平均超過リターンと、符号が一致するか（再現性）
+- `shrunk_excess`: 業種別の平均超過リターンを全業種平均へ寄せた推定値（日付数が少ない業種ほど全業種平均に近づく）
+
+サンプル数が `MIN_SAMPLES`（10件）未満、または発生日数が `MIN_DATES`（5日）未満の組み合わせは除外し、条件を満たさなくなった既存行は削除する。日々の増分は小さいため週1回の実行で十分。
+
+**読み方の目安**: 売買判断の参考にするのは `avg_excess`（または業種別なら `shrunk_excess`）で、`|t_stat|` が 2 以上かつ `is_consistent = true` のもの。生リターン（`avg_return` / `win_rate`）は相場全体の上げ下げを含むため単独では使わない。
+
+### 9. `sync_holidays.py` — 祝日マスタ同期
 
 内閣府が公開する祝日CSVをダウンロードし、`holiday_master` に upsert する。`fetch_stock_prices.py` が祝日をスキップする際に参照する。年1回程度しか更新されないため、月1回の実行で十分。
 
@@ -222,6 +251,8 @@ JPX 上場銘柄（プライム市場）の基本情報。
 | return_5d | NUMERIC(8,4) | 5取引日後のリターン（%） |
 | return_10d | NUMERIC(8,4) | 10取引日後のリターン（%） |
 | return_20d | NUMERIC(8,4) | 20取引日後のリターン（%） |
+| mkt_excess_3d / 5d / 10d / 20d | NUMERIC(8,4) | N取引日後リターン − 市場平均（%） |
+| ind_excess_3d / 5d / 10d / 20d | NUMERIC(8,4) | N取引日後リターン − 同業種平均（%） |
 | created_at | TIMESTAMP | 登録日時 |
 
 **ユニーク制約**: `(code, signal_date, signal_type)`
@@ -255,9 +286,40 @@ JPX 上場銘柄（プライム市場）の基本情報。
 | avg_return | NUMERIC(8,4) | 平均リターン（%） |
 | median_return | NUMERIC(8,4) | 中央値リターン（%） |
 | std_return | NUMERIC(8,4) | 標準偏差（%） |
+| date_count | INTEGER | シグナル発生日のユニーク数 |
+| excess_win_rate | NUMERIC(6,2) | 市場に勝った割合（%） |
+| avg_excess | NUMERIC(8,4) | 平均市場超過リターン（%） |
+| median_excess | NUMERIC(8,4) | 中央値市場超過リターン（%） |
+| avg_ind_excess | NUMERIC(8,4) | 平均業種超過リターン（%） |
+| t_stat | NUMERIC(8,3) | 日付単位で集約した市場超過リターンの t 値 |
+| first_half_excess | NUMERIC(8,4) | 前半期間の平均市場超過リターン（%） |
+| second_half_excess | NUMERIC(8,4) | 後半期間の平均市場超過リターン（%） |
+| is_consistent | BOOLEAN | 全体・前半・後半で符号が一致 |
+| shrunk_excess | NUMERIC(8,4) | 全業種平均へ縮小した平均市場超過リターン（%） |
 | updated_at | TIMESTAMP | 最終更新日時 |
 
 **ユニーク制約**: `(signal_type, industry, period)`
+
+---
+
+### `signal_skip` — シグナル分析の除外銘柄
+
+`detect_price_anomalies` バッチが検出した、株式分割・データ異常・極端な値動きの銘柄と除外期間。ダッシュボードに表示する（`GET /api/v1/signals/skips`）。
+
+| カラム | 型 | 説明 |
+|-------|----|------|
+| id | INTEGER PK | 自動採番 |
+| code | VARCHAR(10) | 証券コード |
+| event_date | DATE | 検出日（異常のあった取引日） |
+| reason | VARCHAR(30) | `split_suspected` / `price_mismatch` / `extreme_move` |
+| detail | TEXT | 検出内容の説明 |
+| ratio | NUMERIC(10,4) | 取得元の前日終値 ÷ 保存済み前日終値 |
+| change_pct | NUMERIC(8,2) | 保存済み前日終値からの騰落率（%） |
+| skip_from | DATE | 除外期間の開始日 |
+| skip_until | DATE | 除外期間の終了日 |
+| created_at | TIMESTAMP | 登録日時 |
+
+**ユニーク制約**: `(code, event_date, reason)`
 
 ---
 
@@ -275,13 +337,16 @@ app_works_backend/
 │   │   ├── holiday_master.py
 │   │   ├── technical_indicator.py
 │   │   ├── signal_history.py
-│   │   └── signal_stats.py
+│   │   ├── signal_stats.py
+│   │   └── signal_skip.py
 │   └── routers/              # APIエンドポイント
 ├── batch/
 │   ├── sync_stock_master.py       # 銘柄マスタ同期
 │   ├── sync_delisted_prices.py    # 上場廃止フラグ更新
 │   ├── fetch_stock_prices.py      # 株価取得
 │   ├── calc_technical.py          # テクニカル指標計算
+│   ├── detect_price_anomalies.py  # 株式分割・極端な値動きの検出（シグナル分析の除外）
+│   ├── signal_skip_util.py        # 除外期間の判定（共通処理）
 │   ├── detect_signals.py          # シグナル検出
 │   ├── update_signal_results.py   # リターン更新
 │   ├── aggregate_stats.py         # 統計集計
