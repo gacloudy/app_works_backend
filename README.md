@@ -38,7 +38,11 @@ cd app_works_backend
 .venv\Scripts\python batch\detect_price_anomalies.py  # 株式分割・極端な値動きを検出し、シグナル分析の除外期間を登録
 .venv\Scripts\python batch\detect_signals.py          # シグナルを検出・記録
 .venv\Scripts\python batch\update_signal_results.py   # シグナル後のリターンを更新
+.venv\Scripts\python batch\calc_market_context.py     # 地合い・業種の強弱を計算
+.venv\Scripts\python batch\fetch_fin_disclosures.py   # J-Quants から決算短信・予想修正を取得（要 JQUANTS_API_KEY）
+.venv\Scripts\python batch\update_disclosure_results.py  # 開示の分類と開示後の株価反応を計算
 .venv\Scripts\python batch\aggregate_stats.py         # 統計サマリーを集計（週1回推奨）
+.venv\Scripts\python batch\aggregate_context_stats.py # 地合い・業種別の検証結果を集計（週1回推奨）
 .venv\Scripts\python batch\sync_holidays.py           # 内閣府CSVから祝日を同期（月1回推奨）
 ```
 
@@ -132,6 +136,49 @@ JPX（日本取引所）の上場銘柄一覧ページから `data_j.xls` の UR
 サンプル数が `MIN_SAMPLES`（10件）未満、または発生日数が `MIN_DATES`（5日）未満の組み合わせは除外し、条件を満たさなくなった既存行は削除する。日々の増分は小さいため週1回の実行で十分。
 
 **読み方の目安**: 売買判断の参考にするのは `avg_excess`（または業種別なら `shrunk_excess`）で、`|t_stat|` が 2 以上かつ `is_consistent = true` のもの。生リターン（`avg_return` / `win_rate`）は相場全体の上げ下げを含むため単独では使わない。
+
+### 8-2. `calc_market_context.py` — 地合い・業種の強弱
+
+`stock_price` と `technical_indicators` から、市場全体の地合い（`market_breadth`）と33業種の強弱（`industry_daily`）を取引日ごとに計算する。`signal_skip` の除外期間にある銘柄は集計から除く。毎回全期間を計算し直して upsert する（冪等）。
+
+- 地合い: 上昇・下落銘柄数、騰落レシオ（25日）、25日線より上の銘柄の割合、平均RSI14、全銘柄の等加重指数
+- 地合いの区分 `regime`: 25日線より上の銘柄の割合が 60%以上 = `strong`、40%以下 = `weak`、それ以外 = `neutral`
+- 業種: 業種内の等加重指数、過去5日・20日のリターンと市場との差、その差による順位（構成3銘柄以上の業種のみ）
+
+### 8-3. `aggregate_context_stats.py` — 地合い・業種別の検証
+
+`calc_market_context.py` と `update_signal_results.py` の結果を使い、以下の2つを集計する。
+
+- `signal_context_stats`: シグナルを発生日の「地合い」「業種の勢い（20日順位の上位1/3・中位・下位1/3）」で分け、市場超過リターンを `aggregate_stats.py` と同じ方法（日付単位の t 値・前半/後半の再現性）で集計する。同じシグナルでも状況によって効き方が変わるかを見る。
+- `industry_momentum_stats`: 毎日、過去5日・20日の市場比で上位5業種・下位5業種を選び、その後5日・20日の市場比リターンを日付単位で集計する。上位−下位の差がプラスなら「勢いが続く」、マイナスなら「反転しやすい」。
+
+結果はフロントエンドの「地合い・業種」ページに表示する（`GET /api/v1/market/*`）。
+
+### 8-4. `fetch_fin_disclosures.py` — 決算・予想修正の取得
+
+J-Quants API（`/v2/fins/summary`）から、決算短信・業績予想の修正・配当予想の修正を取得し `fin_disclosure` に保存する（`stock_master` の銘柄のみ）。環境変数 `JQUANTS_API_KEY`（J-Quants ダッシュボードで発行するAPIキー）が必要。
+
+- 通常は保存済みの最終開示日から今日まで、日付ごとに取得する（初回は 2026-06-01 から）。
+- 初回は `--by-code` で銘柄ごとに全期間を取り込む。業績予想の修正を「前回の予想」と比べるには、過去の決算短信が必要なため。
+- Free プランは「12週間前〜2年12週間前」しか取得できない。範囲外の日付になったところで打ち切り、次回以降に続きから取得する。
+- TDnet のサイトは robots.txt で自動取得を禁止しているため使わない。開示タイトル一覧が必要になった場合は J-Quants の TDnet アドオン（`/v2/td/list`）を使う。
+
+### 8-5. `update_disclosure_results.py` — 開示の分類と株価の反応
+
+`fin_disclosure` の各開示を以下のように分類し、開示後の市場超過リターンを計算する。毎回全件を計算し直す（冪等）。
+
+| event_type | 比較元 → 比較先 |
+|---|---|
+| `earn_revision`（業績予想の修正） | 同じ事業年度の直前の予想 → 修正後の予想 |
+| `div_revision`（配当予想の修正） | 同じ事業年度の直前の年間配当予想 → 修正後 |
+| `q_results`（四半期決算） | 同じ事業年度の直前の予想 → 決算短信に載った予想 |
+| `fy_results`（通期決算） | 当期の実績 → 翌期の会社予想 |
+
+- 利益は営業利益 → 経常利益 → 純利益の順に、両方に値がある項目で比べる。変化率 ±0.5% 以内は `flat`。
+- 反応日 = 開示を株価が反映できる最初の取引日（15:30 より前の開示は当日、以降は翌取引日）。反応日の市場超過リターンと、反応日の終値から 5 / 20 取引日後までの市場超過リターン（ドリフト）を記録する。
+- 株式分割・前日終値の不一致の除外期間にかかる開示は計算しない（極端な値動きは開示への反応そのものなので除外しない）。
+
+結果はフロントエンドの「決算・開示」ページに表示する（`GET /api/v1/disclosures/*`）。
 
 ### 9. `sync_holidays.py` — 祝日マスタ同期
 
@@ -323,6 +370,114 @@ JPX 上場銘柄（プライム市場）の基本情報。
 
 ---
 
+### `market_breadth` — 地合い
+
+取引日ごとの市場全体の状態。`calc_market_context` バッチが計算する。
+
+| カラム | 型 | 説明 |
+|-------|----|------|
+| trade_date | DATE PK | 取引日 |
+| stock_count | INTEGER | 集計対象の銘柄数（除外期間の銘柄を除く） |
+| adv_count / dec_count | INTEGER | 前日比で上昇 / 下落した銘柄数 |
+| adv_dec_ratio_25 | NUMERIC(8,2) | 騰落レシオ（25日） |
+| pct_above_ma25 | NUMERIC(6,2) | 終値が25日移動平均より上の銘柄の割合（%） |
+| avg_rsi14 | NUMERIC(6,2) | RSI14 の平均 |
+| mkt_return | NUMERIC(8,4) | 全銘柄の等加重平均リターン（%） |
+| mkt_index | NUMERIC(12,4) | mkt_return を積み上げた指数（初日 = 100） |
+| regime | VARCHAR(10) | `strong` / `neutral` / `weak` |
+| updated_at | TIMESTAMP | 更新日時 |
+
+---
+
+### `industry_daily` — 業種の強弱
+
+取引日 × 33業種ごとの業種指数と市場との差。`calc_market_context` バッチが計算する。
+
+| カラム | 型 | 説明 |
+|-------|----|------|
+| id | INTEGER PK | 自動採番 |
+| trade_date | DATE | 取引日 |
+| industry | VARCHAR(100) | 33業種区分 |
+| member_count | INTEGER | 集計対象の銘柄数 |
+| return_1d | NUMERIC(8,4) | 業種内の等加重平均リターン（%） |
+| index_value | NUMERIC(12,4) | return_1d を積み上げた業種指数（初日 = 100） |
+| return_5d / return_20d | NUMERIC(8,4) | 業種指数の過去5日 / 20日リターン（%） |
+| excess_5d / excess_20d | NUMERIC(8,4) | 同期間の市場指数リターンとの差（%） |
+| rank_5d / rank_20d | INTEGER | excess の大きい順の順位（1 = 最も強い。構成3銘柄未満の業種は NULL） |
+| pct_above_ma25 | NUMERIC(6,2) | 業種内で25日線より上の銘柄の割合（%） |
+| updated_at | TIMESTAMP | 更新日時 |
+
+**ユニーク制約**: `(trade_date, industry)`
+
+---
+
+### `signal_context_stats` — 地合い・業種の勢い別のシグナル統計
+
+`aggregate_context_stats` バッチが集計する。統計列の意味は `signal_stats` の同名列と同じ。
+
+| カラム | 型 | 説明 |
+|-------|----|------|
+| signal_type | VARCHAR(50) | シグナル種別 |
+| context_type | VARCHAR(30) | `regime`（地合い） / `industry_trend`（業種の勢い） |
+| context_value | VARCHAR(20) | regime: `strong` / `neutral` / `weak`、industry_trend: `strong` / `middle` / `weak` |
+| period | INTEGER | 集計期間（3 / 5 / 10 / 20 日） |
+| sample_count, date_count, excess_win_rate, avg_excess, median_excess, t_stat, first_half_excess, second_half_excess, is_consistent | | `signal_stats` と同じ |
+| updated_at | TIMESTAMP | 最終更新日時 |
+
+**ユニーク制約**: `(signal_type, context_type, context_value, period)`
+
+---
+
+### `industry_momentum_stats` — 業種モメンタムの検証
+
+`aggregate_context_stats` バッチが集計する。値はすべて日付単位（その日の上位/下位5業種の平均）で集計したもの。
+
+| カラム | 型 | 説明 |
+|-------|----|------|
+| lookback | INTEGER | 順位付けに使う過去の期間（5 / 20 日） |
+| horizon | INTEGER | その後の保有期間（5 / 20 日） |
+| bucket | VARCHAR(10) | `top`（上位5業種） / `bottom`（下位5業種） / `spread`（top − bottom） |
+| date_count | INTEGER | 判定日の数 |
+| avg_excess | NUMERIC(8,4) | その後 horizon 日の市場超過リターンの平均（%） |
+| win_rate | NUMERIC(6,2) | 市場超過リターンがプラスだった日の割合（%） |
+| t_stat | NUMERIC(8,3) | t 値（horizon 日のリターンが隣接日で重なるため過大になりやすい） |
+| first_half_excess / second_half_excess / is_consistent | | 前半・後半の平均と符号の一致 |
+| updated_at | TIMESTAMP | 最終更新日時 |
+
+**ユニーク制約**: `(lookback, horizon, bucket)`
+
+---
+
+### `fin_disclosure` — 決算・予想修正と株価の反応
+
+`fetch_fin_disclosures` が J-Quants から取得した値と、`update_disclosure_results` が計算した分類・株価反応。
+
+| カラム | 型 | 説明 |
+|-------|----|------|
+| disc_no | VARCHAR(20) PK | 開示番号 |
+| code | VARCHAR(10) | 証券コード（4桁） |
+| disc_date / disc_time | DATE / VARCHAR(5) | 開示日・時刻（HH:MM） |
+| doc_type | VARCHAR(80) | J-Quants の開示書類種別（例: `EarnForecastRevision`） |
+| cur_per_type | VARCHAR(5) | 1Q / 2Q / 3Q / FY など |
+| cur_fy_st / cur_fy_en / nxt_fy_st / nxt_fy_en | DATE | 当事業年度・翌事業年度の期間 |
+| sales / op / odp / np | NUMERIC(20,0) | 実績（円） |
+| f_sales / f_op / f_odp / f_np | NUMERIC(20,0) | 当事業年度の予想（円） |
+| nx_f_sales / nx_f_op / nx_f_odp / nx_f_np | NUMERIC(20,0) | 翌事業年度の予想（円） |
+| div_ann / f_div_ann / nx_f_div_ann | NUMERIC(12,2) | 年間配当の実績・予想（1株あたり円） |
+| fetched_at | TIMESTAMP | 取得日時 |
+| event_type | VARCHAR(30) | `earn_revision` / `div_revision` / `q_results` / `fy_results` |
+| metric | VARCHAR(10) | 比較に使った項目（`op` / `odp` / `np` / `div`） |
+| base_value / new_value | NUMERIC(20,2) | 比較元 / 比較先 |
+| change_pct | NUMERIC(10,2) | 変化率（%） |
+| direction | VARCHAR(10) | `up` / `down` / `flat`（比較元が見つからない場合は NULL） |
+| reaction_date | DATE | 反応日 |
+| reaction_excess | NUMERIC(8,4) | 反応日の市場超過リターン（%） |
+| drift_5d / drift_20d | NUMERIC(8,4) | 反応日の終値から N 取引日後までの市場超過リターン（%） |
+
+**インデックス**: `(code, disc_date)`
+
+---
+
 ## ディレクトリ構成
 
 ```
@@ -338,7 +493,12 @@ app_works_backend/
 │   │   ├── technical_indicator.py
 │   │   ├── signal_history.py
 │   │   ├── signal_stats.py
-│   │   └── signal_skip.py
+│   │   ├── signal_skip.py
+│   │   ├── market_breadth.py
+│   │   ├── industry_daily.py
+│   │   ├── signal_context_stats.py
+│   │   ├── industry_momentum_stats.py
+│   │   └── fin_disclosure.py
 │   └── routers/              # APIエンドポイント
 ├── batch/
 │   ├── sync_stock_master.py       # 銘柄マスタ同期
@@ -350,6 +510,10 @@ app_works_backend/
 │   ├── detect_signals.py          # シグナル検出
 │   ├── update_signal_results.py   # リターン更新
 │   ├── aggregate_stats.py         # 統計集計
+│   ├── calc_market_context.py     # 地合い・業種の強弱
+│   ├── aggregate_context_stats.py # 地合い・業種別の検証集計
+│   ├── fetch_fin_disclosures.py   # J-Quants から決算・予想修正を取得
+│   ├── update_disclosure_results.py # 開示の分類と株価反応
 │   └── sync_holidays.py           # 祝日同期
 ├── alembic/                  # マイグレーション管理
 ├── .env                      # 接続情報（Git管理外）

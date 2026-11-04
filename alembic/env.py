@@ -21,6 +21,11 @@ import app.models.signal_history   # noqa: F401
 import app.models.signal_stats     # noqa: F401
 import app.models.signal_skip      # noqa: F401
 import app.models.kb_chunk         # noqa: F401
+import app.models.market_breadth   # noqa: F401
+import app.models.industry_daily   # noqa: F401
+import app.models.signal_context_stats     # noqa: F401
+import app.models.industry_momentum_stats  # noqa: F401
+import app.models.fin_disclosure   # noqa: F401
 
 config = context.config
 
