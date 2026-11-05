@@ -4,11 +4,12 @@ J-Quants API（/v2/equities/bars/daily）から過去の日足を取得し、sto
 
 - 取得範囲: --from（省略時は保存済みの jquants 分の翌日、なければ契約プランで取れる最古の日）から、
   野村/Yahoo のデータがある最初の日の前日まで。1日1リクエストで全銘柄を取得する。
-- 価格は既存データと同じく調整前の値（O/H/L/C/Vo）を保存する。
-- prev_close は「前取引日の終値 × 当日の調整係数（AdjFactor）」とする。株式分割の権利落ち日には
-  取引所の基準値と同じく分割後の水準になるため、detect_price_anomalies の分割検出がそのまま働く。
+- 価格・出来高は J-Quants の調整済みの値（AdjO/AdjH/AdjL/AdjC/AdjVo）を保存する。既存の野村/Yahoo のデータは
+  その後の株式分割を反映した水準で保存されており、調整済みの値と一致するため（調整前の値だと分割銘柄で段差ができる）。
+- prev_close は前取引日の調整済み終値。調整済みの系列には分割による段差がないため、分割の検出対象にもならない。
 - stock_master にある銘柄のみ保存する。約定のない日（四本値が Null）は保存しない。
 - 日付ごとに「その日の jquants 分を削除 → 挿入」するため、途中で止まっても再実行できる。
+- --codes を指定すると、その銘柄だけを保存済みの jquants 期間について銘柄単位で取り直す（1銘柄1リクエスト）。
 
 Free プランは「12週間前〜2年12週間前」、5 リクエスト/分。範囲外の古い日付は 400 になるため読み飛ばす。
 
@@ -19,6 +20,7 @@ Free プランは「12週間前〜2年12週間前」、5 リクエスト/分。�
 実行方法:
     cd app_works_backend
     .venv\\Scripts\\python batch\\backfill_jquants_prices.py [--from 2024-08-12] [--to 2026-06-18]
+    .venv\\Scripts\\python batch\\backfill_jquants_prices.py --codes 8035,8766
 """
 
 import sys
@@ -55,9 +57,8 @@ class PlanRangeError(Exception):
     """契約プランの取得可能期間外を指定した。"""
 
 
-def fetch_date(client: httpx.Client, d: date) -> list[dict]:
+def fetch(client: httpx.Client, params: dict) -> list[dict]:
     rows: list[dict] = []
-    params = {"date": d.isoformat()}
     while True:
         time.sleep(REQUEST_INTERVAL)
         res = client.get(API_URL, params=params)
@@ -75,10 +76,77 @@ def fetch_date(client: httpx.Client, d: date) -> list[dict]:
         params = {**params, "pagination_key": body["pagination_key"]}
 
 
+def to_record(r: dict, code: str, prev_close: float | None, now: datetime) -> dict:
+    return {
+        "code":          code,
+        "trade_date":    date.fromisoformat(r["Date"]),
+        "open_price":    r.get("AdjO"),
+        "high_price":    r.get("AdjH"),
+        "low_price":     r.get("AdjL"),
+        "prev_close":    prev_close,
+        "volume":        int(r["AdjVo"]) if r.get("AdjVo") is not None else None,
+        "current_price": r["AdjC"],
+        "source":        SOURCE,
+        "is_delisted":   False,
+        "created_at":    now,
+        "updated_at":    now,
+    }
+
+
+def insert_records(db, records: list[dict]) -> None:
+    # 1行ずつ送るとリモートDBでは1日分に数十秒かかるため、複数行 INSERT でまとめて送る
+    for j in range(0, len(records), 1000):
+        db.execute(insert(StockPrice).values(records[j:j + 1000]))
+
+
+def refetch_codes(client: httpx.Client, codes: list[str]) -> int:
+    """保存済みの jquants 期間について、指定銘柄を銘柄単位で取り直す。"""
+    with SessionLocal() as db:
+        date_from, date_to = db.execute(text(
+            "SELECT MIN(trade_date), MAX(trade_date) FROM trader_schema.stock_price WHERE source = :s"
+        ), {"s": SOURCE}).one()
+    if date_from is None:
+        log.info("保存済みの jquants 分がありません")
+        return 0
+    log.info("銘柄単位で取り直し: %d 銘柄（%s 〜 %s）", len(codes), date_from, date_to)
+
+    total = 0
+    fetch_from = date_from
+    for i, code in enumerate(codes, 1):
+        try:
+            rows = fetch(client, {"code": code, "from": fetch_from.isoformat(), "to": date_to.isoformat()})
+        except PlanRangeError as e:
+            # Free プランの取得可能期間は日々ずれるため、保存済みの最古日が範囲外になっていることがある。
+            # 範囲内の開始日から取り直す（範囲外になった日のこの銘柄の行は、下の DELETE で消える）
+            m = re.search(r"(\d{4}-\d{2}-\d{2}) ~", str(e))
+            if not m:
+                raise
+            fetch_from = date.fromisoformat(m.group(1))
+            log.info("%s 以降を取得します（契約プランの範囲）", fetch_from)
+            rows = fetch(client, {"code": code, "from": fetch_from.isoformat(), "to": date_to.isoformat()})
+        rows = sorted((r for r in rows if r.get("AdjC") is not None), key=lambda r: r["Date"])
+        now = datetime.now()
+        records, prev = [], None
+        for r in rows:
+            records.append(to_record(r, code, prev, now))
+            prev = r["AdjC"]
+        with SessionLocal() as db:
+            db.execute(text("""
+                DELETE FROM trader_schema.stock_price
+                WHERE source = :s AND code = :c AND trade_date BETWEEN :f AND :t
+            """), {"s": SOURCE, "c": code, "f": date_from, "t": date_to})
+            insert_records(db, records)
+            db.commit()
+        total += len(records)
+        log.info("[%d/%d] %s: %d 件", i, len(codes), code, len(records))
+    return total
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--from", dest="date_from", type=date.fromisoformat)
     parser.add_argument("--to", dest="date_to", type=date.fromisoformat)
+    parser.add_argument("--codes", help="カンマ区切りの銘柄コード。指定した銘柄だけを銘柄単位で取り直す")
     args = parser.parse_args()
 
     start = datetime.now()
@@ -87,6 +155,14 @@ def main() -> None:
     api_key = os.environ.get("JQUANTS_API_KEY")
     if not api_key:
         raise RuntimeError("JQUANTS_API_KEY が設定されていません")
+
+    if args.codes:
+        with httpx.Client(headers={"x-api-key": api_key}, timeout=120) as client:
+            total = refetch_codes(client, [c.strip() for c in args.codes.split(",") if c.strip()])
+        elapsed = (datetime.now() - start).total_seconds()
+        log.info("完了: %d 件保存 (%.1f 秒)", total, elapsed)
+        log.info("=== J-Quants 過去株価取り込みバッチ 終了 ===")
+        return
 
     with SessionLocal() as db:
         codes = {r[0] for r in db.execute(text("SELECT code FROM trader_schema.stock_master")).fetchall()}
@@ -108,7 +184,7 @@ def main() -> None:
         d += timedelta(days=1)
     log.info("取得期間: %s 〜 %s（%d 営業日）", date_from, date_to, len(targets))
 
-    # 前取引日の終値（prev_close の計算用）。途中再開時は保存済みの直近終値から始める
+    # 前取引日の終値（prev_close 用）。途中再開時は保存済みの直近終値から始める
     with SessionLocal() as db:
         last_close = dict(db.execute(text("""
             SELECT DISTINCT ON (code) code, current_price FROM trader_schema.stock_price
@@ -124,7 +200,7 @@ def main() -> None:
             if covered_from and d < covered_from:
                 continue
             try:
-                rows = fetch_date(client, d)
+                rows = fetch(client, {"date": d.isoformat()})
             except PlanRangeError as e:
                 # 契約プランの範囲より古い日付。エラー文の "covers the following dates: YYYY-MM-DD ~" から開始日を読む
                 m = re.search(r"(\d{4}-\d{2}-\d{2}) ~", str(e))
@@ -135,32 +211,15 @@ def main() -> None:
             records = []
             for r in rows:
                 code = to_app_code(r["Code"])
-                if code not in codes or r.get("C") is None:
+                if code not in codes or r.get("AdjC") is None:
                     continue
-                prev = last_close.get(code)
-                factor = r.get("AdjFactor") or 1.0
-                records.append({
-                    "code":          code,
-                    "trade_date":    d,
-                    "open_price":    r.get("O"),
-                    "high_price":    r.get("H"),
-                    "low_price":     r.get("L"),
-                    "prev_close":    round(prev * factor, 1) if prev is not None else None,
-                    "volume":        int(r["Vo"]) if r.get("Vo") is not None else None,
-                    "current_price": r["C"],
-                    "source":        SOURCE,
-                    "is_delisted":   False,
-                    "created_at":    now,
-                    "updated_at":    now,
-                })
-                last_close[code] = float(r["C"])
+                records.append(to_record(r, code, last_close.get(code), now))
+                last_close[code] = float(r["AdjC"])
 
             with SessionLocal() as db:
                 db.execute(text("DELETE FROM trader_schema.stock_price WHERE source = :s AND trade_date = :d"),
                            {"s": SOURCE, "d": d})
-                # 1行ずつ送るとリモートDBでは1日分に数十秒かかるため、複数行 INSERT でまとめて送る
-                for j in range(0, len(records), 1000):
-                    db.execute(insert(StockPrice).values(records[j:j + 1000]))
+                insert_records(db, records)
                 db.commit()
             total += len(records)
             if records or i % 20 == 0:
