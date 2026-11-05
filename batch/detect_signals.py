@@ -16,10 +16,12 @@ detect_price_anomalies.py の後に実行すること。
 実行方法:
     cd app_works_backend
     .venv\\Scripts\\python batch\\detect_signals.py
+    .venv\\Scripts\\python batch\\detect_signals.py --full   # signal_history を作り直して全期間を検出する
 """
 
 import sys
 import os
+import argparse
 import json
 import logging
 from datetime import datetime
@@ -53,6 +55,7 @@ def detect_for_stock(code: str, df: pd.DataFrame, price_df: pd.DataFrame) -> lis
 
     df = df.sort_values("trade_date").reset_index(drop=True)
     signals: list[dict] = []
+    closes = {d: float(v) for d, v in zip(price_df["trade_date"], price_df["current_price"]) if v is not None}
 
     for i in range(1, len(df)):
         prev = df.iloc[i - 1]
@@ -60,11 +63,7 @@ def detect_for_stock(code: str, df: pd.DataFrame, price_df: pd.DataFrame) -> lis
         sig_date = curr["trade_date"]
 
         def _price_at(d):
-            rows = price_df[(price_df["code"] == code) & (price_df["trade_date"] == d)]
-            if rows.empty:
-                return None
-            v = rows.iloc[0]["current_price"]
-            return float(v) if v is not None else None
+            return closes.get(d)
 
         def _add(stype: str, detail_dict: dict):
             signals.append({
@@ -108,8 +107,7 @@ def detect_for_stock(code: str, df: pd.DataFrame, price_df: pd.DataFrame) -> lis
         if price is not None:
             p_bbl, c_bbl = _v(prev, "bb_lower"), _v(curr, "bb_lower")
             p_bbu, c_bbu = _v(prev, "bb_upper"), _v(curr, "bb_upper")
-            p_price_rows = price_df[(price_df["code"] == code) & (price_df["trade_date"] == prev["trade_date"])]
-            p_price = float(p_price_rows.iloc[0]["current_price"]) if not p_price_rows.empty else None
+            p_price = _price_at(prev["trade_date"])
 
             if p_price is not None and p_bbl is not None and c_bbl is not None:
                 if p_price > p_bbl and price <= c_bbl:
@@ -121,20 +119,26 @@ def detect_for_stock(code: str, df: pd.DataFrame, price_df: pd.DataFrame) -> lis
         # 出来高急増 + 上昇
         vol_ratio = _v(curr, "volume_ratio")
         if vol_ratio is not None and vol_ratio >= VOLUME_SURGE_RATIO and price is not None:
-            p_price_rows = price_df[(price_df["code"] == code) & (price_df["trade_date"] == prev["trade_date"])]
-            if not p_price_rows.empty:
-                prev_close = p_price_rows.iloc[0].get("current_price")
-                if prev_close is not None and price > float(prev_close):
-                    _add("volume_surge_up", {"volume_ratio": round(vol_ratio, 2), "price": round(price, 1)})
+            prev_close = _price_at(prev["trade_date"])
+            if prev_close is not None and price > prev_close:
+                _add("volume_surge_up", {"volume_ratio": round(vol_ratio, 2), "price": round(price, 1)})
 
     return signals
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--full", action="store_true", help="signal_history を削除して全期間を検出し直す（過去データ取り込み後に使う）")
+    args = parser.parse_args()
+
     start = datetime.now()
     log.info("=== シグナル検出バッチ 開始 ===")
 
     with SessionLocal() as db:
+        if args.full:
+            deleted = db.execute(text("DELETE FROM trader_schema.signal_history")).rowcount
+            db.commit()
+            log.info("--full: signal_history を %d 件削除しました（リターンは update_signal_results で再計算）", deleted)
         last_signal_date = db.execute(
             text("SELECT MAX(signal_date) FROM trader_schema.signal_history")
         ).scalar()

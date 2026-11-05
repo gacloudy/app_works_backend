@@ -1,13 +1,16 @@
 from datetime import date, datetime
 from decimal import Decimal
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Integer, Numeric, String
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Index, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
 
 class StockPrice(Base):
     __tablename__ = "stock_price"
-    __table_args__ = {"schema": "trader_schema"}
+    __table_args__ = (
+        Index("ix_stock_price_code_date", "code", "trade_date"),
+        {"schema": "trader_schema"},
+    )
 
     id:            Mapped[int]            = mapped_column(Integer, primary_key=True, autoincrement=True)
     code:          Mapped[str]            = mapped_column(String(10), nullable=False)

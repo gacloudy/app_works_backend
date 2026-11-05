@@ -6,10 +6,12 @@
 実行方法:
     cd app_works_backend
     .venv\\Scripts\\python batch\\calc_technical.py
+    .venv\\Scripts\\python batch\\calc_technical.py --full   # 全期間を計算し直す（過去データ取り込み後に使う）
 """
 
 import sys
 import os
+import argparse
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -85,11 +87,15 @@ def to_dec(v) -> Decimal | None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--full", action="store_true", help="全期間を計算し直す（過去データ取り込み後に使う）")
+    args = parser.parse_args()
+
     start = datetime.now()
     log.info("=== テクニカル指標計算バッチ 開始 ===")
 
     with SessionLocal() as db:
-        last_date = db.execute(
+        last_date = None if args.full else db.execute(
             text("SELECT MAX(trade_date) FROM trader_schema.technical_indicators")
         ).scalar()
 

@@ -48,6 +48,25 @@ cd app_works_backend
 
 各バッチは前段の出力に依存するため、上記の順序を守って実行する（詳細は次節）。
 
+### 過去の株価の取り込み（一回限り）
+
+日々の株価取得（野村/Yahoo）は 2026-06-19 から。それより前は J-Quants の日足を `backfill_jquants_prices.py` で `source="jquants"` として取り込む（Free プランは2年12週間前まで、有料プランならさらに過去まで取れる）。取り込み後は全期間を再計算する。
+
+```bash
+.venv\Scripts\python batch\backfill_jquants_prices.py      # 途中で止まっても再実行すると続きから取得
+.venv\Scripts\python batch\calc_technical.py --full
+.venv\Scripts\python batch\detect_price_anomalies.py
+.venv\Scripts\python batch\detect_signals.py --full         # signal_history を作り直す
+.venv\Scripts\python batch\update_signal_results.py
+.venv\Scripts\python batch\calc_market_context.py
+.venv\Scripts\python batch\aggregate_stats.py
+.venv\Scripts\python batch\aggregate_context_stats.py
+.venv\Scripts\python batch\update_disclosure_results.py
+```
+
+- 価格は調整前の値。`prev_close` は「前取引日の終値 × J-Quants の調整係数」で、株式分割の権利落ち日には分割後の水準になるため、`detect_price_anomalies.py` の分割検出がそのまま働く。
+- 取り込むのは現在の `stock_master`（プライム）にある銘柄のみ。過去に上場廃止・市場変更になった銘柄は含まれないため、結果には生き残った銘柄に偏る（サバイバーシップ・バイアス）点に注意。
+
 ---
 
 ## 各バッチの役割
