@@ -50,6 +50,7 @@ API_URL = "https://api.jquants.com/v2/equities/bars/daily"
 SOURCE = "jquants"
 EARLIEST = date(2024, 1, 1)   # 契約プランの範囲外は 400 で読み飛ばすため、十分古い日から試す
 REQUEST_INTERVAL = 12.5       # 秒。Free プランは 5 リクエスト/分
+CODE_REQUEST_INTERVAL = 20.0  # 秒。銘柄・期間指定のリクエストは 12.5 秒間隔でも 429 になったため広げる
 RATE_LIMIT_WAIT = 120
 
 
@@ -57,10 +58,10 @@ class PlanRangeError(Exception):
     """契約プランの取得可能期間外を指定した。"""
 
 
-def fetch(client: httpx.Client, params: dict) -> list[dict]:
+def fetch(client: httpx.Client, params: dict, interval: float = REQUEST_INTERVAL) -> list[dict]:
     rows: list[dict] = []
     while True:
-        time.sleep(REQUEST_INTERVAL)
+        time.sleep(interval)
         res = client.get(API_URL, params=params)
         if res.status_code == 429:
             log.warning("レートリミットに達したため %d 秒待機します", RATE_LIMIT_WAIT)
@@ -113,8 +114,9 @@ def refetch_codes(client: httpx.Client, codes: list[str]) -> int:
     total = 0
     fetch_from = date_from
     for i, code in enumerate(codes, 1):
+        params = {"code": code, "from": fetch_from.isoformat(), "to": date_to.isoformat()}
         try:
-            rows = fetch(client, {"code": code, "from": fetch_from.isoformat(), "to": date_to.isoformat()})
+            rows = fetch(client, params, CODE_REQUEST_INTERVAL)
         except PlanRangeError as e:
             # Free プランの取得可能期間は日々ずれるため、保存済みの最古日が範囲外になっていることがある。
             # 範囲内の開始日から取り直す（範囲外になった日のこの銘柄の行は、下の DELETE で消える）
@@ -123,7 +125,7 @@ def refetch_codes(client: httpx.Client, codes: list[str]) -> int:
                 raise
             fetch_from = date.fromisoformat(m.group(1))
             log.info("%s 以降を取得します（契約プランの範囲）", fetch_from)
-            rows = fetch(client, {"code": code, "from": fetch_from.isoformat(), "to": date_to.isoformat()})
+            rows = fetch(client, {**params, "from": fetch_from.isoformat()}, CODE_REQUEST_INTERVAL)
         rows = sorted((r for r in rows if r.get("AdjC") is not None), key=lambda r: r["Date"])
         now = datetime.now()
         records, prev = [], None

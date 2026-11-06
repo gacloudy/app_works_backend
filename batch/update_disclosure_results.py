@@ -34,6 +34,7 @@ from datetime import date, datetime
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from psycopg2.extras import execute_values
 from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -54,6 +55,11 @@ RESULT_COLS = [
     "event_type", "metric", "base_value", "new_value", "change_pct", "direction",
     "reaction_date", "reaction_excess", "drift_5d", "drift_20d",
 ]
+RESULT_TYPES = {
+    "event_type": "text", "metric": "text", "base_value": "numeric", "new_value": "numeric",
+    "change_pct": "numeric", "direction": "text", "reaction_date": "date",
+    "reaction_excess": "numeric", "drift_5d": "numeric", "drift_20d": "numeric",
+}
 
 
 def event_type_of(doc_type: str) -> str | None:
@@ -210,9 +216,17 @@ def main() -> None:
         return round(v, 4) if isinstance(v, float) else v
 
     params = [{"disc_no": r["disc_no"], **{c: clean(r[c]) for c in RESULT_COLS}} for r in disc.to_dict("records")]
-    set_clause = ", ".join(f"{c} = :{c}" for c in RESULT_COLS)
+    # 1件ずつ UPDATE するとリモートDBでは数万件で数十分かかるため、VALUES リストでまとめて更新する
+    set_clause = ", ".join(f"{c} = v.{c}" for c in RESULT_COLS)
+    template = "(%s, " + ", ".join(f"%s::{RESULT_TYPES[c]}" for c in RESULT_COLS) + ")"
+    rows = [(p["disc_no"], *(p[c] for c in RESULT_COLS)) for p in params]
     with SessionLocal() as db:
-        db.execute(text(f"UPDATE trader_schema.fin_disclosure SET {set_clause} WHERE disc_no = :disc_no"), params)
+        cur = db.connection().connection.cursor()
+        execute_values(cur, f"""
+            UPDATE trader_schema.fin_disclosure AS d SET {set_clause}
+            FROM (VALUES %s) AS v(disc_no, {", ".join(RESULT_COLS)})
+            WHERE d.disc_no = v.disc_no
+        """, rows, template=template, page_size=1000)
         db.commit()
 
     counts = disc.dropna(subset=["direction"]).groupby(["event_type", "direction"]).size()

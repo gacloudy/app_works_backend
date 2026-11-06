@@ -21,6 +21,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+from psycopg2.extras import execute_values
 from sqlalchemy import text
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -106,9 +107,17 @@ def main() -> None:
             params.append({"id": row.id, **{c: values.get(c) for c in RESULT_COLS}})
 
     if params:
-        set_clause = ", ".join(f"{c} = COALESCE({c}, :{c})" for c in RESULT_COLS)
+        # 1件ずつ UPDATE するとリモートDBでは数万件で1時間近くかかるため、VALUES リストでまとめて更新する
+        set_clause = ", ".join(f"{c} = COALESCE(sh.{c}, v.{c})" for c in RESULT_COLS)
+        template = "(%s::int, " + ", ".join("%s::numeric" for _ in RESULT_COLS) + ")"
+        rows = [(p["id"], *(p[c] for c in RESULT_COLS)) for p in params]
         with SessionLocal() as db:
-            db.execute(text(f"UPDATE trader_schema.signal_history SET {set_clause} WHERE id = :id"), params)
+            cur = db.connection().connection.cursor()
+            execute_values(cur, f"""
+                UPDATE trader_schema.signal_history AS sh SET {set_clause}
+                FROM (VALUES %s) AS v(id, {", ".join(RESULT_COLS)})
+                WHERE sh.id = v.id
+            """, rows, template=template, page_size=1000)
             db.commit()
 
     elapsed = (datetime.now() - start).total_seconds()
