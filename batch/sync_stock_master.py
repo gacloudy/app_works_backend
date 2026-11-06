@@ -107,6 +107,7 @@ def parse_excel(data: bytes) -> list[dict]:
     idx_name     = col("銘柄名")
     idx_market   = col("市場・商品区分")
     idx_industry = col("33業種区分")
+    idx_scale    = col("規模区分")
 
     for row in rows[1:]:
         if not row or not row[idx_code]:
@@ -117,8 +118,12 @@ def parse_excel(data: bytes) -> list[dict]:
         code     = str(row[idx_code]).strip().split(".")[0]  # 数値の場合 "7203.0" → "7203"
         name     = str(row[idx_name]).strip()
         industry = str(row[idx_industry]).strip()
+        scale    = str(row[idx_scale]).strip()
         if code and name:
-            records.append({"code": code, "name": name, "industry": industry, "market": market})
+            records.append({
+                "code": code, "name": name, "industry": industry, "market": market,
+                "scale": scale if scale not in ("", "-") else None,  # "-" は規模区分なし
+            })
 
     log.info("対象銘柄数: %d 件", len(records))
     return records
@@ -142,6 +147,7 @@ def upsert_stocks(records: list[dict]) -> tuple[int, int, int, int]:
                 existing.name       = rec["name"]
                 existing.industry   = rec["industry"]
                 existing.market     = rec["market"]
+                existing.scale      = rec["scale"]
                 if existing.is_delisted:
                     log.info("復活: %s %s", rec["code"], rec["name"])
                     existing.is_delisted = False

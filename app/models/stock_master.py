@@ -13,6 +13,7 @@ class StockMaster(Base):
     name: Mapped[str] = mapped_column("name", String(200), nullable=False)
     industry: Mapped[str] = mapped_column("industry", String(100), nullable=False)
     market: Mapped[str | None] = mapped_column("market", String(50), nullable=True)
+    scale: Mapped[str | None] = mapped_column("scale", String(30), nullable=True)  # TOPIX規模区分（例: "TOPIX Core30"）
     is_delisted: Mapped[bool] = mapped_column("isDelisted", Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column("createdAt", DateTime, default=datetime.now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column("updatedAt", DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
