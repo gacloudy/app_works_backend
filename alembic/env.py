@@ -29,6 +29,7 @@ import app.models.fin_disclosure   # noqa: F401
 import app.models.signal_trade     # noqa: F401
 import app.models.signal_segment_stats  # noqa: F401
 import app.models.disclosure_trade  # noqa: F401
+import app.models.daily_pick       # noqa: F401
 
 config = context.config
 

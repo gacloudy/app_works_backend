@@ -1,7 +1,7 @@
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth import verify_token
-from app.routers import chat, disclosures, market, signals, stock_master, stock_price, stock_signals
+from app.routers import chat, disclosures, market, picks, signals, stock_master, stock_price, stock_signals
 
 app = FastAPI(
     title="株価分析 API",
@@ -24,6 +24,7 @@ app.include_router(signals.router, prefix="/api/v1", dependencies=[Depends(verif
 app.include_router(market.router, prefix="/api/v1", dependencies=[Depends(verify_token)])
 app.include_router(disclosures.router, prefix="/api/v1", dependencies=[Depends(verify_token)])
 app.include_router(stock_signals.router, prefix="/api/v1", dependencies=[Depends(verify_token)])
+app.include_router(picks.router, prefix="/api/v1", dependencies=[Depends(verify_token)])
 
 
 @app.get("/health")
