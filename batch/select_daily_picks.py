@@ -10,6 +10,7 @@ detect_signals の後に実行する。
   - 候補: その銘柄でそのサインの結果が MIN_COUNT 回以上あり、勝率 MIN_WIN_RATE % 以上、1回平均がプラス
   - 並べ順: score = (回数 × 1回平均 + PRIOR_COUNT × 全銘柄平均) / (回数 + PRIOR_COUNT)
             回数が少ないほど全銘柄の平均に寄せ、少ない回数の偶然の好成績を上位にしにくくする
+  - score が MIN_SCORE % 未満のものは推奨しない（該当がなければ、その日は推奨なし）
   - 1銘柄につき1件（同じ日に複数のサインが出たら score の高い方）
 
 通常（引数なし）: 最新のシグナル日について選び直して保存する（is_live = true）
@@ -48,6 +49,9 @@ COST_PCT = 0.1
 MIN_COUNT = 8
 MIN_WIN_RATE = 60.0
 PRIOR_COUNT = 8
+# score（全銘柄平均に寄せた1回平均）の下限。条件を満たすサインがなければ、その日は推奨なしにする。
+# 5年分の遡り計算では、これより厳しくしても成績が上がる裏付けはなかった（2026-11-07 時点）
+MIN_SCORE = 5.0
 SIGNAL_SIDE = {
     "golden_cross": "buy", "rsi_oversold": "buy", "bb_lower_touch": "buy", "volume_surge_up": "buy",
     "dead_cross": "sell", "rsi_overbought": "sell", "bb_upper_touch": "sell",
@@ -151,6 +155,8 @@ def select(pick_date: date, past: PastTrades, by_date: dict, closes: dict) -> li
             continue
         prior = past.type_mean(stype, pick_date)
         score = (n * avg + PRIOR_COUNT * (prior or 0.0)) / (n + PRIOR_COUNT)
+        if score < MIN_SCORE:
+            continue
         cand = {
             "code": code, "signal_type": stype, "side": SIGNAL_SIDE[stype],
             "close_price": round(closes[(code, pick_date)], 1), "hold_days": HOLD_DAYS,
