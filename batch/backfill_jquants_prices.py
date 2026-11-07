@@ -149,6 +149,8 @@ def main() -> None:
     parser.add_argument("--from", dest="date_from", type=date.fromisoformat)
     parser.add_argument("--to", dest="date_to", type=date.fromisoformat)
     parser.add_argument("--codes", help="カンマ区切りの銘柄コード。指定した銘柄だけを銘柄単位で取り直す")
+    parser.add_argument("--interval", type=float, default=REQUEST_INTERVAL,
+                        help="日付指定のリクエスト間隔（秒）。Light プラン以上（60 リクエスト/分）なら 1.1 程度でよい")
     args = parser.parse_args()
 
     start = datetime.now()
@@ -167,7 +169,10 @@ def main() -> None:
         return
 
     with SessionLocal() as db:
-        codes = {r[0] for r in db.execute(text("SELECT code FROM trader_schema.stock_master")).fetchall()}
+        # 上場廃止済みの銘柄は今後の分析に使わないため取り込まない
+        codes = {r[0] for r in db.execute(text(
+            'SELECT code FROM trader_schema.stock_master WHERE "isDelisted" = false'
+        )).fetchall()}
         holidays = {r[0] for r in db.execute(text("SELECT date FROM trader_schema.holiday_master")).fetchall()}
         first_daily = db.execute(text(
             "SELECT MIN(trade_date) FROM trader_schema.stock_price WHERE source IS DISTINCT FROM :s"
@@ -202,7 +207,7 @@ def main() -> None:
             if covered_from and d < covered_from:
                 continue
             try:
-                rows = fetch(client, {"date": d.isoformat()})
+                rows = fetch(client, {"date": d.isoformat()}, args.interval)
             except PlanRangeError as e:
                 # 契約プランの範囲より古い日付。エラー文の "covers the following dates: YYYY-MM-DD ~" から開始日を読む
                 m = re.search(r"(\d{4}-\d{2}-\d{2}) ~", str(e))
