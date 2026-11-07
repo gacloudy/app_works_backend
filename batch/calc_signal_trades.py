@@ -13,6 +13,8 @@ signal_trades に保存するバッチ。update_signal_results と calc_market_c
   scale         : TOPIX規模区分（stock_master の現在の区分。過去時点の区分ではない）
   industry_trend: シグナル日の業種の過去20日の強さ（aggregate_context_stats と同じ3分割）
   regime        : シグナル日の地合い（market_breadth.regime）
+  recent_disclosure : シグナル日以前 30 日以内の直近の決算・修正（"earn_revision_up" など。なければ "none"、
+                      決算データの取得範囲外は NULL）
 
 毎回全件を作り直す（冪等）。
 
@@ -49,6 +51,7 @@ TURNOVER_BUCKETS = 5
 # 上乗せ（lift）の比較相手: 同じ日に同じ区分にいた全銘柄の平均
 LIFT_KEYS = {"ind": "industry", "scale": "scale", "turn": "turnover_q", "vol": "volume_bucket"}
 LIFT_COLS = [f"lift_{name}_{n}d" for name in LIFT_KEYS for n in PERIODS]
+RECENT_DISCLOSURE_DAYS = 30  # シグナル日から何日前までの決算・修正を「直近」とみなすか（暦日）
 
 
 def volume_bucket_of(ratio: float) -> str | None:
@@ -94,6 +97,47 @@ def calc_price_features(prices: pd.DataFrame, skip_windows: pd.DataFrame) -> pd.
     return p
 
 
+def load_prices(db) -> pd.DataFrame:
+    """銘柄×日付の始値・終値・出来高と、業種・規模区分・出来高比率を返す。"""
+    prices = pd.read_sql(text("""
+        SELECT sp.code, sp.trade_date, sp.open_price, sp.current_price, sp.volume,
+               sm.industry, sm.scale, ti.volume_ratio
+        FROM trader_schema.stock_price sp
+        JOIN trader_schema.stock_master sm ON sm.code = sp.code
+        LEFT JOIN trader_schema.technical_indicators ti
+               ON ti.code = sp.code AND ti.trade_date = sp.trade_date
+        WHERE sp.current_price IS NOT NULL
+    """), db.connection())
+    for c in ["open_price", "current_price", "volume", "volume_ratio"]:
+        prices[c] = prices[c].astype(float)
+    return prices
+
+
+def recent_disclosure_of(signals: pd.DataFrame, disclosures: pd.DataFrame) -> list[str | None]:
+    """各シグナルについて、シグナル日以前 RECENT_DISCLOSURE_DAYS 日以内の直近の決算・修正を返す。
+
+    該当がなければ "none"。決算データの取得範囲外（最後の開示日より後）のシグナルは、
+    開示があったか分からないため None にする。
+    """
+    if disclosures.empty:
+        return [None] * len(signals)
+    disc = disclosures.copy()
+    disc["disc_date"] = pd.to_datetime(disc["disc_date"])
+    disc = disc.sort_values("disc_date")
+    last_disc = disc["disc_date"].max()
+
+    sig = signals[["code", "signal_date"]].copy()
+    sig["_order"] = range(len(sig))
+    sig["signal_ts"] = pd.to_datetime(sig["signal_date"])
+    merged = pd.merge_asof(
+        sig.sort_values("signal_ts"), disc, left_on="signal_ts", right_on="disc_date", by="code",
+        direction="backward", tolerance=pd.Timedelta(days=RECENT_DISCLOSURE_DAYS),
+    ).sort_values("_order")
+    result = merged["event"].where(merged["event"].notna(), "none")
+    result = result.where(merged["signal_ts"] <= last_disc, None)
+    return list(result)
+
+
 def main() -> None:
     start = datetime.now()
     log.info("=== シグナル取引損益計算バッチ 開始 ===")
@@ -106,14 +150,11 @@ def main() -> None:
             LEFT JOIN trader_schema.technical_indicators ti
                    ON ti.code = sh.code AND ti.trade_date = sh.signal_date
         """), db.connection())
-        prices = pd.read_sql(text("""
-            SELECT sp.code, sp.trade_date, sp.open_price, sp.current_price, sp.volume,
-                   sm.industry, sm.scale, ti.volume_ratio
-            FROM trader_schema.stock_price sp
-            JOIN trader_schema.stock_master sm ON sm.code = sp.code
-            LEFT JOIN trader_schema.technical_indicators ti
-                   ON ti.code = sp.code AND ti.trade_date = sp.trade_date
-            WHERE sp.current_price IS NOT NULL
+        prices = load_prices(db)
+        disclosures = pd.read_sql(text("""
+            SELECT code, disc_date, event_type || '_' || direction AS event
+            FROM trader_schema.fin_disclosure
+            WHERE direction IS NOT NULL
         """), db.connection())
         regimes = pd.read_sql(text("SELECT trade_date, regime FROM trader_schema.market_breadth"), db.connection())
         industries = pd.read_sql(text("SELECT trade_date, industry, rank_20d FROM trader_schema.industry_daily"),
@@ -126,8 +167,6 @@ def main() -> None:
         return
     log.info("シグナル: %d 件 / 株価: %d 行", len(signals), len(prices))
 
-    for c in ["open_price", "current_price", "volume", "volume_ratio"]:
-        prices[c] = prices[c].astype(float)
     feats = calc_price_features(prices, skip_windows)
     feat_cols = ["entry_date", "entry_price", "turnover_20d", "turnover_q",
                  *[f"{p}_{n}d" for p in ["ret", "excess"] for n in PERIODS], *LIFT_COLS]
@@ -150,6 +189,7 @@ def main() -> None:
     df = df.merge(ind[["trade_date", "industry", "industry_trend"]],
                   left_on=["signal_date", "industry"], right_on=["trade_date", "industry"], how="left"
                   ).drop(columns="trade_date")
+    df["recent_disclosure"] = recent_disclosure_of(df, disclosures)
 
     now = datetime.now()
 
@@ -177,6 +217,7 @@ def main() -> None:
             "volume_bucket":  r.volume_bucket,
             "industry_trend": r.industry_trend if isinstance(r.industry_trend, str) else None,
             "regime":         r.regime if isinstance(r.regime, str) else None,
+            "recent_disclosure": r.recent_disclosure if isinstance(r.recent_disclosure, str) else None,
             "updated_at":     now,
         }
         for r in df.itertuples(index=False)

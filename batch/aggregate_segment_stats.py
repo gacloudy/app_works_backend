@@ -10,6 +10,11 @@ signal_trades を「シグナル × 切り口」ごとに集計し、signal_segm
   industry_trend : 業種の勢い（strong / middle / weak）               … 同じ業種（lift_ind）
   regime         : 地合い（strong / neutral / weak）                  … 市場平均（地合いは日単位なので excess と同じ）
   scale_volume   : 規模区分 × 出来高比率（"TOPIX Core30|2-3x" など）   … 同じ規模区分（lift_scale）
+  disclosure     : シグナル日以前30日以内の直近の決算・修正（"earn_revision_up" / "none" など） … 同じ業種（lift_ind）
+  change         : 決算・修正の変化率の大きさ（large / small / flat。決算・修正の行のみ） … 同じ業種（lift_ind）
+
+signal_type には、テクニカルのシグナル（signal_trades）に加えて、決算・修正（disclosure_trades の event。
+"earn_revision_up" など）も含める。
   code           : 個別銘柄（件数が少ないため参考値。shrunk_lift を見る） … 同じ業種（lift_ind）
 
 市場平均との差（avg_excess）には、業種や規模そのものの強弱（例: この2年の銀行株の強さ）が混ざる。
@@ -70,8 +75,10 @@ LIFT_PREFIX = {
     "industry": "lift_ind", "industry_trend": "lift_ind", "code": "lift_ind",
     "scale": "lift_scale", "scale_volume": "lift_scale",
     "turnover": "lift_turn", "volume": "lift_vol",
+    "disclosure": "lift_ind", "change": "lift_ind",
 }
-SEGMENTS = ["industry", "scale", "turnover", "volume", "industry_trend", "regime", "scale_volume", "code"]
+SEGMENTS = ["industry", "scale", "turnover", "volume", "industry_trend", "regime", "scale_volume", "disclosure",
+            "change", "code"]
 SHRUNK_SEGMENTS = {"industry", "code"}
 STAT_COLS = [
     "sample_count", "date_count", "avg_net_return", "win_rate", "avg_excess", "excess_win_rate",
@@ -135,17 +142,25 @@ def main() -> None:
 
     value_cols = [f"{p}_{n}d" for p in ["ret", "excess", "lift_ind", "lift_scale", "lift_turn", "lift_vol"]
                   for n in PERIODS]
+    disc_value_cols = [c for c in value_cols if not c.startswith("lift_vol")]
     with SessionLocal() as db:
-        trades = pd.read_sql(text(f"""
+        signal_trades = pd.read_sql(text(f"""
             SELECT code, signal_date, signal_type, industry, scale, turnover_q, volume_bucket, industry_trend, regime,
-                   {", ".join(value_cols)}
+                   recent_disclosure AS disclosure, {", ".join(value_cols)}
             FROM trader_schema.signal_trades
         """), db.connection())
+        # 決算・修正もシグナルの一種（signal_type = "earn_revision_up" など）として同じ方法で集計する
+        disclosure_trades = pd.read_sql(text(f"""
+            SELECT code, base_date AS signal_date, event AS signal_type, industry, scale, turnover_q, industry_trend,
+                   regime, change_bucket AS change, {", ".join(disc_value_cols)}
+            FROM trader_schema.disclosure_trades
+        """), db.connection())
+    trades = pd.concat([signal_trades, disclosure_trades], ignore_index=True)
     if trades.empty:
         log.info("signal_trades が空です（先に calc_signal_trades を実行してください）")
         log.info("=== シグナル切り口別集計バッチ 終了 ===")
         return
-    log.info("取引: %d 件", len(trades))
+    log.info("取引: シグナル %d 件 / 決算・修正 %d 件", len(signal_trades), len(disclosure_trades))
 
     for c in value_cols:
         trades[c] = trades[c].astype(float)

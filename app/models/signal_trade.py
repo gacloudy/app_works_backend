@@ -46,4 +46,6 @@ class SignalTrade(Base):
     volume_bucket:  Mapped[str | None]     = mapped_column(String(10), nullable=True)     # <1x / 1-2x / 2-3x / 3x+
     industry_trend: Mapped[str | None]     = mapped_column(String(10), nullable=True)     # strong / middle / weak
     regime:         Mapped[str | None]     = mapped_column(String(10), nullable=True)     # strong / neutral / weak
+    # シグナル日以前 RECENT_DISCLOSURE_DAYS 日以内の直近の決算・修正（"<event_type>_<direction>"、なければ "none"、データ範囲外は NULL）
+    recent_disclosure: Mapped[str | None]  = mapped_column(String(50), nullable=True)
     updated_at:     Mapped[datetime]       = mapped_column(DateTime, default=datetime.now, nullable=False)

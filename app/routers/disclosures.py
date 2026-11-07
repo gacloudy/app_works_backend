@@ -95,8 +95,10 @@ def disclosure_stats(db: Session = Depends(get_db)):
 
 
 @router.get("/recent", response_model=list[DisclosureItem])
-def recent_disclosures(limit: int = 100, direction: str | None = None, db: Session = Depends(get_db)):
-    """分類済みの開示を新しい順に返す。"""
+def recent_disclosures(
+    limit: int = 100, direction: str | None = None, code: str | None = None, db: Session = Depends(get_db)
+):
+    """分類済みの開示を新しい順に返す。code を指定するとその銘柄だけを返す。"""
     q = (
         db.query(FinDisclosure, StockMaster.name, StockMaster.industry)
         .outerjoin(StockMaster, StockMaster.code == FinDisclosure.code)
@@ -104,6 +106,8 @@ def recent_disclosures(limit: int = 100, direction: str | None = None, db: Sessi
     )
     if direction:
         q = q.filter(FinDisclosure.direction == direction)
+    if code:
+        q = q.filter(FinDisclosure.code == code)
     q = q.order_by(FinDisclosure.disc_date.desc(), FinDisclosure.disc_time.desc()).limit(limit)
     return [
         DisclosureItem(
