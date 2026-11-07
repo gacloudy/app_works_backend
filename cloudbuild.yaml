@@ -3,6 +3,10 @@ substitutions:
   _PROJECT_ID: xenon-depth-342814
   _SERVICE: trader-backend
   _AR_REPO: trader-backend
+  # フロントエンドがIDトークンの宛先(audience)に指定しているURL(フロントの BACKEND_URL と同じ値)
+  _AUTH_AUDIENCE: https://trader-backend-1039104868824.asia-northeast1.run.app
+  # バックエンドの呼び出しを許可するサービスアカウント(現在はフロントエンドの実行SA)。複数ならカンマ区切り
+  _AUTH_ALLOWED_CALLERS: 1039104868824-compute@developer.gserviceaccount.com
 
 steps:
   # Docker イメージをビルド
@@ -32,9 +36,11 @@ steps:
       - --image=${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
       - --region=${_REGION}
       - --platform=managed
-      - --allow-unauthenticated
+      # 呼び出しは roles/run.invoker を持つアカウントだけに限る(Cloud Run の IAM で確認させる)
+      - --no-allow-unauthenticated
       - --timeout=300
-      - --set-env-vars=GCP_PROJECT_ID=${_PROJECT_ID}
+      # 値にカンマが入っても壊れないよう、区切り文字を @ に変える(先頭の ^@^ が gcloud の指定方法)
+      - --set-env-vars=^@^GCP_PROJECT_ID=${_PROJECT_ID}@AUTH_AUDIENCE=${_AUTH_AUDIENCE}@AUTH_ALLOWED_CALLERS=${_AUTH_ALLOWED_CALLERS}
       - --set-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,VOYAGE_API_KEY=VOYAGE_API_KEY:latest
 
 images:
